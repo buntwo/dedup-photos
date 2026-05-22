@@ -139,19 +139,44 @@ def test_dedup_sidecar_comparison_byte_checks_after_hash_match(tmp_path: Path, m
     assert not output_root.exists()
 
 
-def test_takeout_photos_from_year_priority(tmp_path: Path) -> None:
+def test_takeout_non_date_album_beats_photos_from_year(tmp_path: Path) -> None:
     input_root = tmp_path / "IN"
     output_root = tmp_path / "OUT"
-    album = write(input_root / "Takeout" / "Trip to Turkey" / "photo.jpg", b"same")
-    yearly = write(input_root / "Takeout" / "Photos from 2021" / "photo.jpg", b"same")
-    mobile = write(input_root / "mobilebackup" / "photo.jpg", b"same")
+    album = write(input_root / "Google Photos" / "20240101 Takeout" / "Sunday Funday" / "photo.jpg", b"same")
+    yearly = write(input_root / "Google Photos" / "20240101 Takeout" / "Photos from 2023" / "photo.jpg", b"same")
 
     log_rows = run(tmp_path, [input_root], output_root, move=True)
 
-    assert yearly.exists()
-    assert not album.exists()
-    assert not mobile.exists()
-    assert events(log_rows, "keeper_primary")[0]["source_path"] == str(yearly)
+    assert album.exists()
+    assert not yearly.exists()
+    assert events(log_rows, "keeper_primary")[0]["source_path"] == str(album)
+
+
+def test_fewer_date_like_directory_segments_win(tmp_path: Path) -> None:
+    input_root = tmp_path / "IN"
+    output_root = tmp_path / "OUT"
+    fewer_dates = write(input_root / "Takeout" / "Sunday Funday" / "photo.jpg", b"same")
+    more_dates = write(input_root / "Takeout" / "20240101" / "Photos from 2023" / "photo.jpg", b"same")
+
+    log_rows = run(tmp_path, [input_root], output_root, move=True)
+
+    assert fewer_dates.exists()
+    assert not more_dates.exists()
+    assert events(log_rows, "keeper_primary")[0]["source_path"] == str(fewer_dates)
+
+
+def test_sidecar_priority_beats_date_directory_penalty(tmp_path: Path) -> None:
+    input_root = tmp_path / "IN"
+    output_root = tmp_path / "OUT"
+    with_sidecar_in_dated_dir = write(input_root / "Takeout" / "20240101" / "photo.jpg", b"same")
+    write(input_root / "Takeout" / "20240101" / "photo.mov", b"live")
+    without_sidecar = write(input_root / "Takeout" / "Sunday Funday" / "photo.jpg", b"same")
+
+    log_rows = run(tmp_path, [input_root], output_root, move=True)
+
+    assert with_sidecar_in_dated_dir.exists()
+    assert not without_sidecar.exists()
+    assert events(log_rows, "keeper_primary")[0]["source_path"] == str(with_sidecar_in_dated_dir)
 
 
 def test_destination_collision_skips_bundle(tmp_path: Path) -> None:
@@ -241,6 +266,36 @@ def test_verify_fails_when_output_file_should_have_won_by_sidecar_precedence(tmp
     verify_rows = rows(verify_log)
     assert verify_rows[0]["disposition"] == "verify_failed"
     assert verify_rows[0]["reason"] == "moved_file_should_have_been_keeper"
+
+
+def test_verify_succeeds_when_output_file_lost_by_date_directory_precedence(tmp_path: Path) -> None:
+    input_root = tmp_path / "IN"
+    output_root = tmp_path / "OUT"
+    write(input_root / "Takeout" / "Sunday Funday" / "photo.jpg", b"image")
+    write(output_root / "IN" / "Takeout" / "Photos from 2023" / "photo.jpg", b"image")
+
+    verify_log = tmp_path / "verify.csv"
+    result = run_verify([input_root], output_root, verify_log)
+
+    assert result.checked == 1
+    assert result.matched == 1
+    assert result.failed == 0
+    assert rows(verify_log)[0]["disposition"] == "verify_matched"
+
+
+def test_verify_fails_when_output_file_should_have_won_by_date_directory_precedence(tmp_path: Path) -> None:
+    input_root = tmp_path / "IN"
+    output_root = tmp_path / "OUT"
+    write(input_root / "Takeout" / "Photos from 2023" / "photo.jpg", b"image")
+    write(output_root / "IN" / "Takeout" / "Sunday Funday" / "photo.jpg", b"image")
+
+    verify_log = tmp_path / "verify.csv"
+    result = run_verify([input_root], output_root, verify_log)
+
+    assert result.checked == 1
+    assert result.matched == 0
+    assert result.failed == 1
+    assert rows(verify_log)[0]["reason"] == "moved_file_should_have_been_keeper"
 
 
 def test_verify_fails_when_output_primary_has_no_equal_input_primary(tmp_path: Path) -> None:

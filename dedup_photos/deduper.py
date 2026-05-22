@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+import re
 import shutil
 from collections import defaultdict
 from dataclasses import dataclass
@@ -11,6 +12,9 @@ from typing import Iterable, TextIO
 import xxhash
 
 from dedup_photos.constants import HASH_CHUNK_SIZE, PRIMARY_IMAGE_EXTENSIONS
+
+
+DATE_DIRECTORY_TOKEN_RE = re.compile(r"(?<!\d)(?:\d{4}-\d{2}-\d{2}|\d{8}|\d{4})(?!\d)")
 
 
 @dataclass(frozen=True)
@@ -237,8 +241,8 @@ def files_have_same_signature(left: Path, right: Path) -> bool:
 def keeper_key(primary: PrimaryFile) -> tuple[int, int, int, int, str, str]:
     return (
         0 if primary.sidecars else 1,
+        date_directory_score(primary.path),
         0 if has_takeout_segment(primary.path) else 1,
-        0 if has_photos_from_year_segment(primary.path) else 1,
         1 if has_mobilebackup_segment(primary.path) else 0,
         primary.input_root.label.lower(),
         primary.relative_path.as_posix().lower(),
@@ -257,15 +261,8 @@ def has_mobilebackup_segment(path: Path) -> bool:
     return any("mobilebackup" in part.lower() for part in path.parts)
 
 
-def has_photos_from_year_segment(path: Path) -> bool:
-    for part in path.parts:
-        lowered = part.lower()
-        if not lowered.startswith("photos from "):
-            continue
-        year = lowered.removeprefix("photos from ")
-        if len(year) == 4 and year.isdigit():
-            return True
-    return False
+def date_directory_score(path: Path) -> int:
+    return sum(1 for part in path.parent.parts if DATE_DIRECTORY_TOKEN_RE.search(part))
 
 
 class CsvLogger:

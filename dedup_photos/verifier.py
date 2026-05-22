@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
@@ -14,6 +15,9 @@ from dedup_photos.deduper import (
     normalize_input_roots,
     validate_dupe_root,
 )
+
+
+VERIFY_DATE_DIRECTORY_TOKEN_RE = re.compile(r"(?<!\d)(?:\d{4}-\d{2}-\d{2}|\d{8}|\d{4})(?!\d)")
 
 
 @dataclass(frozen=True)
@@ -216,18 +220,16 @@ def independent_keeper_key(primary: VerifyPrimary) -> tuple[int, int, int, int, 
     lowered_parts = tuple(part.lower() for part in primary.logical_parts)
     return (
         0 if primary.sidecars else 1,
+        independent_date_directory_score(primary.logical_parts),
         0 if any("takeout" in part for part in lowered_parts) else 1,
-        0 if any(is_photos_from_year_segment(part) for part in lowered_parts) else 1,
         1 if any("mobilebackup" in part for part in lowered_parts) else 0,
         "/".join(lowered_parts),
     )
 
 
-def is_photos_from_year_segment(lowered_part: str) -> bool:
-    if not lowered_part.startswith("photos from "):
-        return False
-    year = lowered_part.removeprefix("photos from ")
-    return len(year) == 4 and year.isdigit()
+def independent_date_directory_score(logical_parts: tuple[str, ...]) -> int:
+    directory_parts = logical_parts[:-1]
+    return sum(1 for part in directory_parts if VERIFY_DATE_DIRECTORY_TOKEN_RE.search(part))
 
 
 def log_verify_failure(
