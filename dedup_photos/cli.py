@@ -55,12 +55,16 @@ def build_manifest_parser() -> argparse.ArgumentParser:
         epilog=(
             "local_batch_root and --nas-root must be matching tree roots.\n"
             "For each local file, the relative path under local_batch_root is appended to --nas-root.\n\n"
+            "--nas-root must already exist and be mounted/readable. Its basename must match\n"
+            "local_batch_root, and directories through two levels are checked as a quick\n"
+            "guard against pointing at the wrong NAS tree.\n\n"
             "Example:\n"
             "  copied NAS tree: /my/nas/google_photos\n"
             "  local copy:      /local/project/google_photos\n"
             "  command:         dedup-photos-manifest manifest /local/project/google_photos \\\n"
             "                     --nas-root /my/nas/google_photos\n\n"
             "Default manifest path: /local/project/google_photos.manifest.csv\n"
+            "The manifest command refuses to overwrite an existing manifest file.\n"
             "A local file /local/project/google_photos/2021/img.jpg is recorded as\n"
             "/my/nas/google_photos/2021/img.jpg."
         ),
@@ -79,7 +83,7 @@ def build_manifest_parser() -> argparse.ArgumentParser:
     manifest.add_argument(
         "--manifest",
         type=Path,
-        help="CSV manifest path to write. Defaults to LOCAL_BATCH_ROOT.manifest.csv.",
+        help="CSV manifest path to create. Defaults to LOCAL_BATCH_ROOT.manifest.csv and must not already exist.",
     )
 
     plan = subparsers.add_parser(
@@ -182,11 +186,12 @@ def manifest_main(argv: list[str] | None = None) -> int:
                 args.local_batch_root,
                 args.nas_root,
                 args.manifest or default_manifest_output_path(args.local_batch_root),
+                show_progress=True,
             )
             print(f"Wrote manifest to {manifest_path}")
             return 0
         if args.command == "plan":
-            result = plan_from_manifests(args.manifests, args.output, args.log)
+            result = plan_from_manifests(args.manifests, args.output, args.log, show_progress=True)
             print(
                 f"Wrote manifest move plan to {result.log_path}; "
                 f"duplicate_groups={result.duplicate_groups} "
@@ -194,14 +199,14 @@ def manifest_main(argv: list[str] | None = None) -> int:
             )
             return 0
         if args.command == "verify-bytes":
-            result = verify_manifests(args.manifests, args.log, byte_check=True)
+            result = verify_manifests(args.manifests, args.log, byte_check=True, show_progress=True)
             print(
                 f"Completed manifest verify; checked_groups={result.checked_groups} "
                 f"failed_groups={result.failed_groups}; wrote CSV log to {result.log_path}"
             )
             return 1 if result.failed_groups else 0
         if args.command == "execute-plan":
-            result = execute_plan(args.plan, args.log, args.move)
+            result = execute_plan(args.plan, args.log, args.move, show_progress=True)
             print(
                 f"Completed execute-plan; bundles={result.bundles} "
                 f"planned={result.planned_bundles} moved={result.moved_bundles} "
@@ -210,7 +215,7 @@ def manifest_main(argv: list[str] | None = None) -> int:
             )
             return 1 if result.skipped_bundles or result.orphan_sidecars else 0
         if args.command == "verify-move":
-            result = verify_move(args.manifests, args.output, args.log)
+            result = verify_move(args.manifests, args.output, args.log, show_progress=True)
             print(
                 f"Completed verify-move; checked_paths={result.checked_paths} "
                 f"matched_paths={result.matched_paths} failed_paths={result.failed_paths} "

@@ -37,6 +37,15 @@ def write_csv(path: Path, fieldnames: list[str], csv_rows: list[dict[str, str]])
         writer.writerows(csv_rows)
 
 
+def prepare_nas_root(local_root: Path, nas_parent: Path) -> Path:
+    nas_root = nas_parent / local_root.name
+    nas_root.mkdir(parents=True, exist_ok=True)
+    for path in local_root.rglob("*"):
+        if path.is_dir() and not path.is_symlink():
+            (nas_root / path.relative_to(local_root)).mkdir(parents=True, exist_ok=True)
+    return nas_root
+
+
 def make_move_plan(tmp_path: Path, *, with_sidecars: bool = False) -> tuple[Path, Path, Path, Path]:
     nas_one = tmp_path / "nas-one"
     nas_two = tmp_path / "nas-two"
@@ -92,11 +101,12 @@ def make_conflict_manifests(tmp_path: Path) -> tuple[list[Path], Path, Path, Pat
 
 
 def test_generate_manifest_stores_nas_paths_and_sidecars(tmp_path: Path) -> None:
-    local_root = tmp_path / "batch"
+    local_root = tmp_path / "google photos"
     nas_root = tmp_path / "nas" / "google photos"
     manifest_path = tmp_path / "batch.csv"
     write(local_root / "2024" / "photo.HEIC", b"image")
     write(local_root / "2024" / "photo.MOV", b"video")
+    prepare_nas_root(local_root, tmp_path / "nas")
 
     generate_manifest(local_root, nas_root, manifest_path)
 
@@ -114,18 +124,102 @@ def test_generate_manifest_stores_nas_paths_and_sidecars(tmp_path: Path) -> None
     assert len(json.loads(row["sidecar_xxh128s"])[0]) == 32
 
 
+def test_generate_manifest_refuses_existing_manifest_path(tmp_path: Path) -> None:
+    local_root = tmp_path / "google_photos"
+    nas_root = tmp_path / "nas" / "google_photos"
+    manifest_path = tmp_path / "google_photos.manifest.csv"
+    write(local_root / "2024" / "photo.jpg", b"image")
+    prepare_nas_root(local_root, tmp_path / "nas")
+    manifest_path.write_text("do not overwrite\n", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="manifest already exists"):
+        generate_manifest(local_root, nas_root, manifest_path)
+
+    assert manifest_path.read_text(encoding="utf-8") == "do not overwrite\n"
+
+
+def test_manifest_cli_refuses_existing_default_manifest_path(tmp_path: Path) -> None:
+    local_root = tmp_path / "google_photos"
+    nas_root = tmp_path / "nas" / "google_photos"
+    default_manifest = tmp_path / "google_photos.manifest.csv"
+    write(local_root / "2024" / "photo.jpg", b"image")
+    prepare_nas_root(local_root, tmp_path / "nas")
+    default_manifest.write_text("do not overwrite\n", encoding="utf-8")
+
+    with pytest.raises(SystemExit) as exit_info:
+        manifest_main(["manifest", str(local_root), "--nas-root", str(nas_root)])
+
+    assert exit_info.value.code == 2
+    assert default_manifest.read_text(encoding="utf-8") == "do not overwrite\n"
+
+
+def test_generate_manifest_requires_existing_nas_root(tmp_path: Path) -> None:
+    local_root = tmp_path / "google_photos"
+    write(local_root / "photo.jpg", b"image")
+
+    with pytest.raises(ValueError, match="NAS root does not exist"):
+        generate_manifest(local_root, tmp_path / "nas" / "google_photos", tmp_path / "manifest.csv")
+
+
+def test_generate_manifest_requires_nas_root_directory(tmp_path: Path) -> None:
+    local_root = tmp_path / "google_photos"
+    nas_root = write(tmp_path / "nas" / "google_photos", b"not a directory")
+    write(local_root / "photo.jpg", b"image")
+
+    with pytest.raises(ValueError, match="NAS root is not a directory"):
+        generate_manifest(local_root, nas_root, tmp_path / "manifest.csv")
+
+
+def test_generate_manifest_requires_matching_root_basename(tmp_path: Path) -> None:
+    local_root = tmp_path / "google_photos"
+    nas_root = tmp_path / "nas" / "not_google_photos"
+    write(local_root / "photo.jpg", b"image")
+    nas_root.mkdir(parents=True)
+
+    with pytest.raises(ValueError, match="basename must match"):
+        generate_manifest(local_root, nas_root, tmp_path / "manifest.csv")
+
+
+def test_generate_manifest_requires_matching_directory_structure_to_depth_two(tmp_path: Path) -> None:
+    local_root = tmp_path / "google_photos"
+    nas_root = tmp_path / "nas" / "google_photos"
+    write(local_root / "2024" / "May" / "photo.jpg", b"image")
+    (nas_root / "2024").mkdir(parents=True)
+
+    with pytest.raises(ValueError, match="missing local directories"):
+        generate_manifest(local_root, nas_root, tmp_path / "manifest.csv")
+
+    (nas_root / "2024" / "May").mkdir(parents=True)
+    (nas_root / "2025").mkdir()
+    with pytest.raises(ValueError, match="extra directories"):
+        generate_manifest(local_root, nas_root, tmp_path / "manifest.csv")
+
+
+def test_generate_manifest_ignores_structure_differences_below_depth_two(tmp_path: Path) -> None:
+    local_root = tmp_path / "google_photos"
+    nas_root = tmp_path / "nas" / "google_photos"
+    manifest_path = tmp_path / "manifest.csv"
+    write(local_root / "2024" / "May" / "local_only" / "photo.jpg", b"image")
+    (nas_root / "2024" / "May" / "nas_only").mkdir(parents=True)
+
+    generate_manifest(local_root, nas_root, manifest_path)
+
+    assert rows(manifest_path)[0]["relative_path"] == "2024/May/local_only/photo.jpg"
+
+
 def test_plan_from_manifests_uses_sidecar_precedence_and_nas_destinations(tmp_path: Path) -> None:
-    local_one = tmp_path / "local-google"
-    local_two = tmp_path / "local-backups"
-    nas_one = Path("/volume1/photo/google photos")
-    nas_two = Path("/volume1/homes/btu/photos/backups")
+    local_one = tmp_path / "google photos"
+    local_two = tmp_path / "backups"
+    nas_parent = tmp_path / "nas"
     manifest_one = tmp_path / "google.csv"
     manifest_two = tmp_path / "backups.csv"
     log_path = tmp_path / "plan.csv"
-    output_root = Path("/volume1/photo/dupes")
+    output_root = tmp_path / "dupes"
     write(local_one / "photo.jpg", b"same")
     write(local_two / "photo.jpg", b"same")
     write(local_two / "photo.mov", b"live")
+    nas_one = prepare_nas_root(local_one, nas_parent)
+    nas_two = prepare_nas_root(local_two, nas_parent)
     generate_manifest(local_one, nas_one, manifest_one)
     generate_manifest(local_two, nas_two, manifest_two)
 
@@ -152,8 +246,10 @@ def test_plan_from_manifests_skips_sidecar_conflicts(tmp_path: Path) -> None:
     write(local_one / "photo.json", b"left")
     write(local_two / "photo.jpg", b"same")
     write(local_two / "photo.json", b"right")
-    generate_manifest(local_one, Path("/nas/one"), manifest_one)
-    generate_manifest(local_two, Path("/nas/two"), manifest_two)
+    nas_one = prepare_nas_root(local_one, tmp_path / "nas")
+    nas_two = prepare_nas_root(local_two, tmp_path / "nas")
+    generate_manifest(local_one, nas_one, manifest_one)
+    generate_manifest(local_two, nas_two, manifest_two)
 
     result = plan_from_manifests([manifest_one, manifest_two], Path("/dupes"), log_path)
 
@@ -165,8 +261,8 @@ def test_plan_from_manifests_skips_sidecar_conflicts(tmp_path: Path) -> None:
 
 def test_verify_manifests_byte_checks_same_hash_groups(tmp_path: Path) -> None:
     nas_root = tmp_path / "nas"
-    local_one = tmp_path / "local-one"
-    local_two = tmp_path / "local-two"
+    local_one = tmp_path / "one"
+    local_two = tmp_path / "two"
     manifest_one = tmp_path / "one.csv"
     manifest_two = tmp_path / "two.csv"
     log_path = tmp_path / "verify.csv"
@@ -197,8 +293,10 @@ def test_same_size_different_hashes_remain_unique(tmp_path: Path) -> None:
     log_path = tmp_path / "plan.csv"
     write(local_one / "a.jpg", b"aaaa")
     write(local_two / "b.jpg", b"bbbb")
-    generate_manifest(local_one, Path("/nas/one"), manifest_one)
-    generate_manifest(local_two, Path("/nas/two"), manifest_two)
+    nas_one = prepare_nas_root(local_one, tmp_path / "nas")
+    nas_two = prepare_nas_root(local_two, tmp_path / "nas")
+    generate_manifest(local_one, nas_one, manifest_one)
+    generate_manifest(local_two, nas_two, manifest_two)
 
     result = plan_from_manifests([manifest_one, manifest_two], Path("/dupes"), log_path)
 
@@ -208,11 +306,12 @@ def test_same_size_different_hashes_remain_unique(tmp_path: Path) -> None:
 
 
 def test_duplicate_identical_nas_paths_are_collapsed(tmp_path: Path) -> None:
-    local_root = tmp_path / "local"
-    nas_root = Path("/nas/photos")
+    local_root = tmp_path / "photos"
+    nas_root = tmp_path / "nas" / "photos"
     manifest_path = tmp_path / "manifest.csv"
     log_path = tmp_path / "plan.csv"
     write(local_root / "photo.jpg", b"only-copy")
+    prepare_nas_root(local_root, tmp_path / "nas")
     generate_manifest(local_root, nas_root, manifest_path)
 
     result = plan_from_manifests([manifest_path, manifest_path], Path("/dupes"), log_path)
@@ -222,13 +321,14 @@ def test_duplicate_identical_nas_paths_are_collapsed(tmp_path: Path) -> None:
 
 
 def test_conflicting_duplicate_nas_paths_are_rejected(tmp_path: Path) -> None:
-    local_one = tmp_path / "one"
-    local_two = tmp_path / "two"
-    nas_root = Path("/nas/photos")
+    local_one = tmp_path / "batch-one" / "photos"
+    local_two = tmp_path / "batch-two" / "photos"
+    nas_root = tmp_path / "nas" / "photos"
     manifest_one = tmp_path / "one.csv"
     manifest_two = tmp_path / "two.csv"
     write(local_one / "photo.jpg", b"left")
     write(local_two / "photo.jpg", b"right")
+    prepare_nas_root(local_one, tmp_path / "nas")
     generate_manifest(local_one, nas_root, manifest_one)
     generate_manifest(local_two, nas_root, manifest_two)
 
@@ -238,8 +338,8 @@ def test_conflicting_duplicate_nas_paths_are_rejected(tmp_path: Path) -> None:
 
 def test_verify_manifests_byte_check_fails_same_hash_different_bytes(tmp_path: Path) -> None:
     nas_root = tmp_path / "nas"
-    local_one = tmp_path / "local-one"
-    local_two = tmp_path / "local-two"
+    local_one = tmp_path / "one"
+    local_two = tmp_path / "two"
     manifest_one = tmp_path / "one.csv"
     manifest_two = tmp_path / "two.csv"
     log_path = tmp_path / "verify.csv"
@@ -272,8 +372,10 @@ def test_plan_from_manifests_handles_multiple_duplicate_groups(tmp_path: Path) -
     write(local_two / "a.jpg", b"same-a")
     write(local_one / "b.jpg", b"same-b")
     write(local_two / "b.jpg", b"same-b")
-    generate_manifest(local_one, Path("/nas/one"), manifest_one)
-    generate_manifest(local_two, Path("/nas/two"), manifest_two)
+    nas_one = prepare_nas_root(local_one, tmp_path / "nas")
+    nas_two = prepare_nas_root(local_two, tmp_path / "nas")
+    generate_manifest(local_one, nas_one, manifest_one)
+    generate_manifest(local_two, nas_two, manifest_two)
 
     result = plan_from_manifests([manifest_one, manifest_two], Path("/dupes"), log_path)
 
@@ -293,34 +395,39 @@ def test_plan_from_manifests_emits_sidecar_move_destinations(tmp_path: Path) -> 
     write(local_one / "a" / "photo.mov", b"live")
     write(local_two / "a" / "photo.jpg", b"same")
     write(local_two / "a" / "photo.mov", b"live")
-    generate_manifest(local_one, Path("/nas/one"), manifest_one)
-    generate_manifest(local_two, Path("/nas/two"), manifest_two)
+    nas_one = prepare_nas_root(local_one, tmp_path / "nas")
+    nas_two = prepare_nas_root(local_two, tmp_path / "nas")
+    generate_manifest(local_one, nas_one, manifest_one)
+    generate_manifest(local_two, nas_two, manifest_two)
 
     plan_from_manifests([manifest_one, manifest_two], output_root, log_path)
 
     sidecar_rows = [row for row in rows(log_path) if row["event"] == "sidecar_move"]
     assert len(sidecar_rows) == 1
-    assert sidecar_rows[0]["source_path"] == "/nas/two/a/photo.mov"
+    assert sidecar_rows[0]["source_path"] == str(nas_two / "a" / "photo.mov")
     assert sidecar_rows[0]["destination_path"] == "/dupes/two/a/photo.mov"
 
 
 def test_plan_from_manifests_preserves_date_takeout_mobilebackup_precedence(tmp_path: Path) -> None:
-    local_one = tmp_path / "one"
-    local_two = tmp_path / "two"
-    local_three = tmp_path / "three"
+    local_one = tmp_path / "Sunday Funday"
+    local_two = tmp_path / "Photos from 2023"
+    local_three = tmp_path / "mobilebackup"
     manifests = [tmp_path / "one.csv", tmp_path / "two.csv", tmp_path / "three.csv"]
     log_path = tmp_path / "plan.csv"
     write(local_one / "photo.jpg", b"same")
     write(local_two / "photo.jpg", b"same")
     write(local_three / "photo.jpg", b"same")
-    generate_manifest(local_one, Path("/nas/takeout/Sunday Funday"), manifests[0])
-    generate_manifest(local_two, Path("/nas/takeout/20240101/Photos from 2023"), manifests[1])
-    generate_manifest(local_three, Path("/nas/mobilebackup"), manifests[2])
+    nas_one = prepare_nas_root(local_one, tmp_path / "nas" / "takeout")
+    nas_two = prepare_nas_root(local_two, tmp_path / "nas" / "takeout" / "20240101")
+    nas_three = prepare_nas_root(local_three, tmp_path / "nas")
+    generate_manifest(local_one, nas_one, manifests[0])
+    generate_manifest(local_two, nas_two, manifests[1])
+    generate_manifest(local_three, nas_three, manifests[2])
 
     plan_from_manifests(manifests, Path("/dupes"), log_path)
 
     keeper = [row for row in rows(log_path) if row["event"] == "keeper_primary"][0]
-    assert keeper["source_path"] == "/nas/takeout/Sunday Funday/photo.jpg"
+    assert keeper["source_path"] == str(nas_one / "photo.jpg")
 
 
 def test_equivalent_sidecars_on_both_sides_allow_planning(tmp_path: Path) -> None:
@@ -333,8 +440,10 @@ def test_equivalent_sidecars_on_both_sides_allow_planning(tmp_path: Path) -> Non
     write(local_one / "photo.json", b"metadata")
     write(local_two / "photo.jpg", b"same")
     write(local_two / "photo.json", b"metadata")
-    generate_manifest(local_one, Path("/nas/one"), manifest_one)
-    generate_manifest(local_two, Path("/nas/two"), manifest_two)
+    nas_one = prepare_nas_root(local_one, tmp_path / "nas")
+    nas_two = prepare_nas_root(local_two, tmp_path / "nas")
+    generate_manifest(local_one, nas_one, manifest_one)
+    generate_manifest(local_two, nas_two, manifest_two)
 
     result = plan_from_manifests([manifest_one, manifest_two], Path("/dupes"), log_path)
 
@@ -443,11 +552,64 @@ def test_manifest_cli_subcommands(tmp_path: Path) -> None:
     assert rows(verify_log)[0]["disposition"] == "verify_matched"
 
 
+def test_manifest_cli_subcommands_emit_progress(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    local_one = tmp_path / "one"
+    local_two = tmp_path / "two"
+    nas_root = tmp_path / "nas"
+    manifest_one = tmp_path / "one.csv"
+    manifest_two = tmp_path / "two.csv"
+    plan_log = tmp_path / "plan.csv"
+    execute_log = tmp_path / "execute.csv"
+    verify_log = tmp_path / "verify.csv"
+    move_verify_log = tmp_path / "move_verify.csv"
+    output_root = tmp_path / "dupes"
+    write(local_one / "a.jpg", b"same")
+    write(local_two / "b.jpg", b"same")
+    write(nas_root / "one" / "a.jpg", b"same")
+    write(nas_root / "two" / "b.jpg", b"same")
+
+    assert manifest_main(["manifest", str(local_one), "--nas-root", str(nas_root / "one"), "--manifest", str(manifest_one)]) == 0
+    progress = capsys.readouterr().err
+    assert "manifest-hash" in progress
+    assert "done=100.0%" in progress
+    assert "primaries_hashed=1" in progress
+    assert "planned_moves" not in progress
+    assert "manifests_loaded" not in progress
+    assert manifest_main(["manifest", str(local_two), "--nas-root", str(nas_root / "two"), "--manifest", str(manifest_two)]) == 0
+    assert "primaries_hashed=1" in capsys.readouterr().err
+    assert manifest_main(["plan", str(manifest_one), str(manifest_two), "--output", str(output_root), "--log", str(plan_log)]) == 0
+    progress = capsys.readouterr().err
+    assert "manifest-plan" in progress
+    assert "done=100.0%" in progress
+    assert "planned_moves=1" in progress
+    assert "primaries_hashed" not in progress
+    assert manifest_main(["verify-bytes", str(manifest_one), str(manifest_two), "--log", str(verify_log)]) == 0
+    progress = capsys.readouterr().err
+    assert "manifest-verify-bytes" in progress
+    assert "done=100.0%" in progress
+    assert "groups_checked=1" in progress
+    assert "planned_moves" not in progress
+    assert manifest_main(["execute-plan", str(plan_log), "--move", "--log", str(execute_log)]) == 0
+    progress = capsys.readouterr().err
+    assert "manifest-execute" in progress
+    assert "done=100.0%" in progress
+    assert "moved_files=1" in progress
+    assert "bytes_hashed" not in progress
+    assert manifest_main(["verify-move", str(manifest_one), str(manifest_two), "--output", str(output_root), "--log", str(move_verify_log)]) == 0
+    progress = capsys.readouterr().err
+    assert "manifest-verify-move" in progress
+    assert "manifest-output-scan" in progress
+    assert "done=100.0%" in progress
+    assert "paths_checked=3" in progress
+    assert "planned_moves" not in progress
+
+
 def test_manifest_cli_default_manifest_path(tmp_path: Path) -> None:
     local_root = tmp_path / "google_photos"
     nas_root = tmp_path / "nas" / "google_photos"
     default_manifest = tmp_path / "google_photos.manifest.csv"
     write(local_root / "2021" / "img.jpg", b"image")
+    prepare_nas_root(local_root, tmp_path / "nas")
 
     assert manifest_main(["manifest", str(local_root), "--nas-root", str(nas_root)]) == 0
 

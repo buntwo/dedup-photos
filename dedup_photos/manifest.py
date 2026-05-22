@@ -22,6 +22,7 @@ from dedup_photos.deduper import (
     has_takeout_segment,
     is_primary_image,
 )
+from dedup_photos.progress import Progress
 
 
 MANIFEST_FIELDS = [
@@ -114,57 +115,115 @@ class PlanBundle:
     sidecars: tuple[PlanRow, ...]
 
 
-def hash_file_xxh128(path: Path) -> str:
+def hash_file_xxh128(path: Path, progress: Progress | None = None, file_role: str = "primary") -> str:
     hasher = xxhash.xxh128()
     with path.open("rb", buffering=0) as file:
         while chunk := file.read(HASH_CHUNK_SIZE):
             hasher.update(chunk)
+            if progress is not None:
+                progress.manifest_hash_bytes(len(chunk))
+    if progress is not None:
+        progress.manifest_file_hashed(file_role)
     return hasher.hexdigest()
 
 
-def generate_manifest(local_batch_root: Path, nas_root: Path, manifest_path: Path) -> Path:
+def generate_manifest(
+    local_batch_root: Path,
+    nas_root: Path,
+    manifest_path: Path,
+    show_progress: bool = False,
+) -> Path:
     local_root = local_batch_root.resolve()
     if not local_root.is_dir():
         raise ValueError(f"local batch root is not a directory: {local_batch_root}")
+    if manifest_path.exists():
+        raise ValueError(f"manifest already exists: {manifest_path}")
+    validate_manifest_roots(local_root, nas_root)
 
     nas_root_str = str(nas_root)
     nas_root_label = nas_root.name
     created_at = datetime.now().isoformat(timespec="seconds")
+    progress = Progress(mode="manifest", total_images=0, enabled=show_progress)
 
-    manifest_path.parent.mkdir(parents=True, exist_ok=True)
-    with manifest_path.open("w", newline="", encoding="utf-8") as file:
-        writer = csv.DictWriter(file, fieldnames=MANIFEST_FIELDS)
-        writer.writeheader()
-        for path in sorted(local_root.rglob("*")):
-            if path.is_symlink() or not path.is_file() or not is_primary_image(path):
-                continue
-            relative_path = path.relative_to(local_root)
-            sidecars = tuple(find_sidecars(path))
-            sidecar_relative_paths = tuple(sidecar.relative_to(local_root) for sidecar in sidecars)
-            sidecar_sizes = tuple(sidecar.stat().st_size for sidecar in sidecars)
-            sidecar_hashes = tuple(hash_file_xxh128(sidecar) for sidecar in sidecars)
-            writer.writerow(
-                {
-                    "manifest_version": MANIFEST_VERSION,
-                    "created_at": created_at,
-                    "batch_root": str(local_root),
-                    "nas_root": nas_root_str,
-                    "nas_root_label": nas_root_label,
-                    "nas_path": str(nas_root / relative_path),
-                    "relative_path": relative_path.as_posix(),
-                    "size_bytes": path.stat().st_size,
-                    "xxh128": hash_file_xxh128(path),
-                    "sidecar_count": len(sidecars),
-                    "sidecar_paths": json_dumps([str(nas_root / relative) for relative in sidecar_relative_paths]),
-                    "sidecar_relative_paths": json_dumps([relative.as_posix() for relative in sidecar_relative_paths]),
-                    "sidecar_sizes": json_dumps(sidecar_sizes),
-                    "sidecar_xxh128s": json_dumps(sidecar_hashes),
-                }
-            )
+    try:
+        paths = sorted(local_root.rglob("*"))
+        progress.start_phase("manifest-hash", len(paths))
+        manifest_path.parent.mkdir(parents=True, exist_ok=True)
+        with manifest_path.open("w", newline="", encoding="utf-8") as file:
+            writer = csv.DictWriter(file, fieldnames=MANIFEST_FIELDS)
+            writer.writeheader()
+            for path in paths:
+                progress.manifest_entry_scanned()
+                if path.is_symlink() or not path.is_file() or not is_primary_image(path):
+                    continue
+                relative_path = path.relative_to(local_root)
+                sidecars = tuple(find_sidecars(path))
+                sidecar_relative_paths = tuple(sidecar.relative_to(local_root) for sidecar in sidecars)
+                sidecar_sizes = tuple(sidecar.stat().st_size for sidecar in sidecars)
+                sidecar_hashes = tuple(hash_file_xxh128(sidecar, progress, "sidecar") for sidecar in sidecars)
+                writer.writerow(
+                    {
+                        "manifest_version": MANIFEST_VERSION,
+                        "created_at": created_at,
+                        "batch_root": str(local_root),
+                        "nas_root": nas_root_str,
+                        "nas_root_label": nas_root_label,
+                        "nas_path": str(nas_root / relative_path),
+                        "relative_path": relative_path.as_posix(),
+                        "size_bytes": path.stat().st_size,
+                        "xxh128": hash_file_xxh128(path, progress, "primary"),
+                        "sidecar_count": len(sidecars),
+                        "sidecar_paths": json_dumps([str(nas_root / relative) for relative in sidecar_relative_paths]),
+                        "sidecar_relative_paths": json_dumps([relative.as_posix() for relative in sidecar_relative_paths]),
+                        "sidecar_sizes": json_dumps(sidecar_sizes),
+                        "sidecar_xxh128s": json_dumps(sidecar_hashes),
+                    }
+                )
+                progress.manifest_row_written()
+    finally:
+        progress.finish()
     return manifest_path
 
 
-def load_manifests(manifest_paths: Iterable[Path]) -> list[ManifestEntry]:
+def validate_manifest_roots(local_root: Path, nas_root: Path, structure_depth: int = 2) -> None:
+    if not nas_root.exists():
+        raise ValueError(f"NAS root does not exist: {nas_root}")
+    if not nas_root.is_dir():
+        raise ValueError(f"NAS root is not a directory: {nas_root}")
+    if local_root.name != nas_root.name:
+        raise ValueError(
+            f"local batch root basename must match NAS root basename: {local_root.name!r} != {nas_root.name!r}"
+        )
+
+    local_dirs = directory_relative_paths(local_root, structure_depth)
+    nas_dirs = directory_relative_paths(nas_root, structure_depth)
+    missing_on_nas = sorted(local_dirs - nas_dirs)
+    extra_on_nas = sorted(nas_dirs - local_dirs)
+    if missing_on_nas:
+        sample = ", ".join(path.as_posix() for path in missing_on_nas[:5])
+        raise ValueError(f"NAS root is missing local directories within depth {structure_depth}: {sample}")
+    if extra_on_nas:
+        sample = ", ".join(path.as_posix() for path in extra_on_nas[:5])
+        raise ValueError(f"NAS root has extra directories within depth {structure_depth}: {sample}")
+
+
+def directory_relative_paths(root: Path, max_depth: int) -> set[Path]:
+    directories: set[Path] = set()
+    stack = [(root, 0)]
+    while stack:
+        current, depth = stack.pop()
+        if depth >= max_depth:
+            continue
+        for child in current.iterdir():
+            if child.is_symlink() or not child.is_dir():
+                continue
+            relative = child.relative_to(root)
+            directories.add(relative)
+            stack.append((child, depth + 1))
+    return directories
+
+
+def load_manifests(manifest_paths: Iterable[Path], progress: Progress | None = None) -> list[ManifestEntry]:
     entries: list[ManifestEntry] = []
     for manifest_path in manifest_paths:
         with manifest_path.open(newline="", encoding="utf-8") as file:
@@ -203,6 +262,10 @@ def load_manifests(manifest_paths: Iterable[Path]) -> list[ManifestEntry]:
                         sidecar_xxh128s=sidecar_hashes,
                     )
                 )
+                if progress is not None:
+                    progress.manifest_entry_loaded()
+        if progress is not None:
+            progress.manifest_manifest_loaded()
     return collapse_duplicate_manifest_paths(entries)
 
 
@@ -233,61 +296,78 @@ def manifest_entries_match(left: ManifestEntry, right: ManifestEntry) -> bool:
     )
 
 
-def plan_from_manifests(manifest_paths: list[Path], output_root: Path, log_path: Path | None) -> ManifestPlanResult:
-    entries = load_manifests(manifest_paths)
-    actual_log_path = log_path or default_log_path()
-    groups, uniques = manifest_duplicate_groups(entries)
-    mode = "manifest_plan"
-    duplicate_files = 0
-    skipped_groups = 0
+def plan_from_manifests(
+    manifest_paths: list[Path],
+    output_root: Path,
+    log_path: Path | None,
+    show_progress: bool = False,
+) -> ManifestPlanResult:
+    progress = Progress(mode="manifest_plan", total_images=0, enabled=show_progress)
+    try:
+        progress.start_phase("manifest-load", len(manifest_paths))
+        entries = load_manifests(manifest_paths, progress)
+        actual_log_path = log_path or default_log_path()
+        groups, uniques = manifest_duplicate_groups(entries)
+        progress.manifest_group_stats(len(groups), len(uniques))
+        progress.start_phase("manifest-plan", len(uniques) + len(groups))
+        mode = "manifest_plan"
+        duplicate_files = 0
+        skipped_groups = 0
 
-    actual_log_path.parent.mkdir(parents=True, exist_ok=True)
-    with actual_log_path.open("w", newline="", encoding="utf-8") as file:
-        logger = CsvLogger(file, mode=mode, hash_field="xxh128")
-        for unique in sorted(uniques, key=manifest_sort_key):
-            logger.row(
-                disposition="kept_unique_primary",
-                event="unique_primary",
-                status="unique",
-                file_role="primary",
-                input_root=unique.nas_root_label,
-                source_path=unique.nas_path,
-                size_bytes=unique.size_bytes,
-                digest=unique.xxh128,
-                message="no equal primary image found in manifests",
-            )
-        for index, group in enumerate(groups, start=1):
-            group_id = f"m{index:06d}"
-            keeper = choose_manifest_keeper(group)
-            if keeper is None:
-                skipped_groups += 1
-                log_manifest_sidecar_conflict(logger, group_id, group)
-                continue
-            logger.row(
-                disposition="kept_duplicate_keeper",
-                event="keeper_primary",
-                status="kept",
-                group_id=group_id,
-                file_role="primary",
-                input_root=keeper.nas_root_label,
-                source_path=keeper.nas_path,
-                keeper_path=keeper.nas_path,
-                size_bytes=keeper.size_bytes,
-                digest=keeper.xxh128,
-                reason="selected_by_manifest_priority",
-            )
-            for duplicate in sorted(group, key=manifest_sort_key):
-                if duplicate == keeper:
+        actual_log_path.parent.mkdir(parents=True, exist_ok=True)
+        with actual_log_path.open("w", newline="", encoding="utf-8") as file:
+            logger = CsvLogger(file, mode=mode, hash_field="xxh128")
+            for unique in sorted(uniques, key=manifest_sort_key):
+                logger.row(
+                    disposition="kept_unique_primary",
+                    event="unique_primary",
+                    status="unique",
+                    file_role="primary",
+                    input_root=unique.nas_root_label,
+                    source_path=unique.nas_path,
+                    size_bytes=unique.size_bytes,
+                    digest=unique.xxh128,
+                    message="no equal primary image found in manifests",
+                )
+                progress.advance()
+            for index, group in enumerate(groups, start=1):
+                group_id = f"m{index:06d}"
+                keeper = choose_manifest_keeper(group)
+                if keeper is None:
+                    skipped_groups += 1
+                    progress.manifest_skipped_group()
+                    log_manifest_sidecar_conflict(logger, group_id, group)
+                    progress.advance()
                     continue
-                duplicate_files += 1
-                log_manifest_duplicate_plan(logger, group_id, duplicate, keeper, output_root)
+                logger.row(
+                    disposition="kept_duplicate_keeper",
+                    event="keeper_primary",
+                    status="kept",
+                    group_id=group_id,
+                    file_role="primary",
+                    input_root=keeper.nas_root_label,
+                    source_path=keeper.nas_path,
+                    keeper_path=keeper.nas_path,
+                    size_bytes=keeper.size_bytes,
+                    digest=keeper.xxh128,
+                    reason="selected_by_manifest_priority",
+                )
+                for duplicate in sorted(group, key=manifest_sort_key):
+                    if duplicate == keeper:
+                        continue
+                    duplicate_files += 1
+                    progress.manifest_planned_move()
+                    log_manifest_duplicate_plan(logger, group_id, duplicate, keeper, output_root)
+                progress.advance()
 
-    return ManifestPlanResult(
-        log_path=actual_log_path,
-        duplicate_groups=len(groups),
-        duplicate_files=duplicate_files,
-        skipped_groups=skipped_groups,
-    )
+        return ManifestPlanResult(
+            log_path=actual_log_path,
+            duplicate_groups=len(groups),
+            duplicate_files=duplicate_files,
+            skipped_groups=skipped_groups,
+        )
+    finally:
+        progress.finish()
 
 
 def manifest_duplicate_groups(entries: list[ManifestEntry]) -> tuple[list[list[ManifestEntry]], list[ManifestEntry]]:
@@ -413,213 +493,249 @@ def manifest_destination_for(output_root: Path, nas_root_label: str, relative_pa
     return output_root / nas_root_label / relative_path
 
 
-def verify_manifests(manifest_paths: list[Path], log_path: Path | None, byte_check: bool) -> ManifestVerifyResult:
+def verify_manifests(
+    manifest_paths: list[Path],
+    log_path: Path | None,
+    byte_check: bool,
+    show_progress: bool = False,
+) -> ManifestVerifyResult:
     if not byte_check:
         raise ValueError("verify_manifests requires byte_check=True")
-    entries = load_manifests(manifest_paths)
-    groups, _ = manifest_duplicate_groups(entries)
-    actual_log_path = log_path or default_log_path()
-    failed_groups = 0
+    progress = Progress(mode="manifest_verify", total_images=0, enabled=show_progress)
+    try:
+        progress.start_phase("manifest-load", len(manifest_paths))
+        entries = load_manifests(manifest_paths, progress)
+        groups, uniques = manifest_duplicate_groups(entries)
+        progress.manifest_group_stats(len(groups), len(uniques))
+        progress.start_phase("manifest-verify-bytes", len(groups))
+        actual_log_path = log_path or default_log_path()
+        failed_groups = 0
 
-    actual_log_path.parent.mkdir(parents=True, exist_ok=True)
-    with actual_log_path.open("w", newline="", encoding="utf-8") as file:
-        logger = CsvLogger(file, mode="manifest_verify", hash_field="xxh128")
-        for index, group in enumerate(groups, start=1):
-            group_id = f"m{index:06d}"
-            failures = byte_check_manifest_group(group)
-            if failures:
-                failed_groups += 1
-                for entry in failures:
+        actual_log_path.parent.mkdir(parents=True, exist_ok=True)
+        with actual_log_path.open("w", newline="", encoding="utf-8") as file:
+            logger = CsvLogger(file, mode="manifest_verify", hash_field="xxh128")
+            for index, group in enumerate(groups, start=1):
+                group_id = f"m{index:06d}"
+                failures = byte_check_manifest_group(group, progress)
+                failed = bool(failures)
+                if failed:
+                    failed_groups += 1
+                    for entry in failures:
+                        logger.row(
+                            disposition="verify_failed",
+                            event="verify_manifest_primary",
+                            status="error",
+                            group_id=group_id,
+                            file_role="primary",
+                            input_root=entry.nas_root_label,
+                            source_path=entry.nas_path,
+                            size_bytes=entry.size_bytes,
+                            digest=entry.xxh128,
+                            reason="same_manifest_hash_but_bytes_differ",
+                        )
+                else:
                     logger.row(
-                        disposition="verify_failed",
-                        event="verify_manifest_primary",
-                        status="error",
+                        disposition="verify_matched",
+                        event="verify_manifest_group",
+                        status="kept",
                         group_id=group_id,
-                        file_role="primary",
-                        input_root=entry.nas_root_label,
-                        source_path=entry.nas_path,
-                        size_bytes=entry.size_bytes,
-                        digest=entry.xxh128,
-                        reason="same_manifest_hash_but_bytes_differ",
+                        size_bytes=group[0].size_bytes,
+                        digest=group[0].xxh128,
+                        reason="all_manifest_hash_matches_are_byte_equal",
                     )
-            else:
-                logger.row(
-                    disposition="verify_matched",
-                    event="verify_manifest_group",
-                    status="kept",
-                    group_id=group_id,
-                    size_bytes=group[0].size_bytes,
-                    digest=group[0].xxh128,
-                    reason="all_manifest_hash_matches_are_byte_equal",
-                )
+                progress.manifest_group_checked(failed)
 
-    return ManifestVerifyResult(
-        log_path=actual_log_path,
-        checked_groups=len(groups),
-        failed_groups=failed_groups,
-    )
+        return ManifestVerifyResult(
+            log_path=actual_log_path,
+            checked_groups=len(groups),
+            failed_groups=failed_groups,
+        )
+    finally:
+        progress.finish()
 
 
-def byte_check_manifest_group(group: list[ManifestEntry]) -> list[ManifestEntry]:
+def byte_check_manifest_group(group: list[ManifestEntry], progress: Progress | None = None) -> list[ManifestEntry]:
     reference = group[0]
     failures: list[ManifestEntry] = []
     for entry in group[1:]:
-        if not files_equal_by_path(reference.nas_path, entry.nas_path):
+        if not files_equal_by_path(reference.nas_path, entry.nas_path, progress):
             failures.append(entry)
     return failures
 
 
-def files_equal_by_path(left: Path, right: Path) -> bool:
+def files_equal_by_path(left: Path, right: Path, progress: Progress | None = None) -> bool:
     if left.stat().st_size != right.stat().st_size:
         return False
     with left.open("rb", buffering=0) as left_file, right.open("rb", buffering=0) as right_file:
         while True:
             left_chunk = left_file.read(HASH_CHUNK_SIZE)
             right_chunk = right_file.read(HASH_CHUNK_SIZE)
+            if progress is not None:
+                progress.manifest_compare_bytes(len(left_chunk) + len(right_chunk))
             if left_chunk != right_chunk:
                 return False
             if not left_chunk:
                 return True
 
 
-def verify_move(manifest_paths: list[Path], output_root: Path, log_path: Path | None) -> VerifyMoveResult:
-    entries = load_manifests(manifest_paths)
-    actual_log_path = log_path or default_log_path()
-    expected_destinations: set[Path] = set()
-    checked_paths = 0
-    matched_paths = 0
-    failed_paths = 0
-    unexpected_outputs = 0
+def verify_move(
+    manifest_paths: list[Path],
+    output_root: Path,
+    log_path: Path | None,
+    show_progress: bool = False,
+) -> VerifyMoveResult:
+    progress = Progress(mode="manifest_verify_move", total_images=0, enabled=show_progress)
+    try:
+        progress.start_phase("manifest-load", len(manifest_paths))
+        entries = load_manifests(manifest_paths, progress)
+        actual_log_path = log_path or default_log_path()
+        expected_destinations: set[Path] = set()
+        checked_paths = 0
+        matched_paths = 0
+        failed_paths = 0
+        unexpected_outputs = 0
 
-    if output_root.exists() and not output_root.is_dir():
-        raise ValueError(f"output root is not a directory: {output_root}")
+        if output_root.exists() and not output_root.is_dir():
+            raise ValueError(f"output root is not a directory: {output_root}")
 
-    groups, uniques = verify_move_groups(entries)
-    actual_log_path.parent.mkdir(parents=True, exist_ok=True)
-    with actual_log_path.open("w", newline="", encoding="utf-8") as file:
-        logger = CsvLogger(file, mode="verify_move", hash_field="xxh128")
-        for unique in sorted(uniques, key=verify_move_sort_key):
-            for path, size_bytes, digest, file_role in verify_move_entry_source_checks(unique):
-                matched = verify_move_log_source_intact(
-                    logger,
-                    entry=unique,
-                    path=path,
-                    size_bytes=size_bytes,
-                    digest=digest,
-                    file_role=file_role,
-                    disposition="verify_move_unique_intact",
-                    event="verify_move_unique",
-                    reason="unique_source_intact",
-                )
-                checked_paths += 1
-                if matched:
-                    matched_paths += 1
-                else:
-                    failed_paths += 1
+        groups, uniques = verify_move_groups(entries)
+        progress.manifest_group_stats(len(groups), len(uniques))
+        progress.start_phase("manifest-verify-move", verify_move_expected_check_count(groups, uniques))
+        actual_log_path.parent.mkdir(parents=True, exist_ok=True)
+        with actual_log_path.open("w", newline="", encoding="utf-8") as file:
+            logger = CsvLogger(file, mode="verify_move", hash_field="xxh128")
+            for unique in sorted(uniques, key=verify_move_sort_key):
+                for path, size_bytes, digest, file_role in verify_move_entry_source_checks(unique):
+                    matched = verify_move_log_source_intact(
+                        logger,
+                        entry=unique,
+                        path=path,
+                        size_bytes=size_bytes,
+                        digest=digest,
+                        file_role=file_role,
+                        disposition="verify_move_unique_intact",
+                        event="verify_move_unique",
+                        reason="unique_source_intact",
+                    )
+                    checked_paths += 1
+                    if matched:
+                        matched_paths += 1
+                    else:
+                        failed_paths += 1
+                    progress.manifest_path_checked(matched)
 
-        for index, group in enumerate(groups, start=1):
-            group_id = f"m{index:06d}"
-            if verify_move_sidecar_conflict(group):
-                for entry in sorted(group, key=verify_move_sort_key):
-                    for path, size_bytes, digest, file_role in verify_move_entry_source_checks(entry):
-                        matched = verify_move_log_source_intact(
+            for index, group in enumerate(groups, start=1):
+                group_id = f"m{index:06d}"
+                if verify_move_sidecar_conflict(group):
+                    for entry in sorted(group, key=verify_move_sort_key):
+                        for path, size_bytes, digest, file_role in verify_move_entry_source_checks(entry):
+                            matched = verify_move_log_source_intact(
+                                logger,
+                                entry=entry,
+                                path=path,
+                                size_bytes=size_bytes,
+                                digest=digest,
+                                file_role=file_role,
+                                disposition="verify_move_skipped_conflict_intact",
+                                event="verify_move_sidecar_conflict",
+                                reason="sidecar_conflict_source_intact",
+                                group_id=group_id,
+                            )
+                            checked_paths += 1
+                            if matched:
+                                matched_paths += 1
+                            else:
+                                failed_paths += 1
+                            progress.manifest_path_checked(matched)
+                    continue
+
+                keeper = verify_move_choose_keeper(group)
+                for path, size_bytes, digest, file_role in verify_move_entry_source_checks(keeper):
+                    matched = verify_move_log_source_intact(
+                        logger,
+                        entry=keeper,
+                        path=path,
+                        size_bytes=size_bytes,
+                        digest=digest,
+                        file_role=file_role,
+                        disposition="verify_move_matched",
+                        event="verify_move_keeper",
+                        reason="keeper_source_intact",
+                        group_id=group_id,
+                        keeper_path=keeper.nas_path,
+                    )
+                    checked_paths += 1
+                    if matched:
+                        matched_paths += 1
+                    else:
+                        failed_paths += 1
+                    progress.manifest_path_checked(matched)
+
+                for duplicate in sorted(group, key=verify_move_sort_key):
+                    if duplicate == keeper:
+                        continue
+                    source_checks = verify_move_entry_source_checks(duplicate)
+                    for path, size_bytes, digest, file_role in source_checks:
+                        matched = verify_move_log_source_missing(
                             logger,
-                            entry=entry,
+                            entry=duplicate,
                             path=path,
                             size_bytes=size_bytes,
                             digest=digest,
                             file_role=file_role,
-                            disposition="verify_move_skipped_conflict_intact",
-                            event="verify_move_sidecar_conflict",
-                            reason="sidecar_conflict_source_intact",
                             group_id=group_id,
+                            keeper_path=keeper.nas_path,
                         )
                         checked_paths += 1
                         if matched:
                             matched_paths += 1
                         else:
                             failed_paths += 1
-                continue
+                        progress.manifest_path_checked(matched)
 
-            keeper = verify_move_choose_keeper(group)
-            for path, size_bytes, digest, file_role in verify_move_entry_source_checks(keeper):
-                matched = verify_move_log_source_intact(
-                    logger,
-                    entry=keeper,
-                    path=path,
-                    size_bytes=size_bytes,
-                    digest=digest,
-                    file_role=file_role,
-                    disposition="verify_move_matched",
-                    event="verify_move_keeper",
-                    reason="keeper_source_intact",
-                    group_id=group_id,
-                    keeper_path=keeper.nas_path,
+                    for path, size_bytes, digest, file_role in verify_move_entry_destination_checks(duplicate, output_root):
+                        expected_destinations.add(path)
+                        matched = verify_move_log_destination_present(
+                            logger,
+                            entry=duplicate,
+                            path=path,
+                            size_bytes=size_bytes,
+                            digest=digest,
+                            file_role=file_role,
+                            group_id=group_id,
+                            keeper_path=keeper.nas_path,
+                        )
+                        checked_paths += 1
+                        if matched:
+                            matched_paths += 1
+                        else:
+                            failed_paths += 1
+                        progress.manifest_path_checked(matched)
+
+            output_entries = sorted(output_root.rglob("*")) if output_root.is_dir() else []
+            progress.start_phase("manifest-output-scan", len(output_entries))
+            for path in verify_move_unexpected_outputs(output_entries, expected_destinations, actual_log_path, progress):
+                unexpected_outputs += 1
+                progress.manifest_unexpected_output()
+                logger.row(
+                    disposition="verify_move_unexpected_output",
+                    event="verify_move_output_scan",
+                    status="error",
+                    source_path=path,
+                    size_bytes=path.stat().st_size,
+                    reason="unexpected_output_file",
+                    message="output file is not an expected moved duplicate or sidecar",
                 )
-                checked_paths += 1
-                if matched:
-                    matched_paths += 1
-                else:
-                    failed_paths += 1
 
-            for duplicate in sorted(group, key=verify_move_sort_key):
-                if duplicate == keeper:
-                    continue
-                source_checks = verify_move_entry_source_checks(duplicate)
-                for path, size_bytes, digest, file_role in source_checks:
-                    matched = verify_move_log_source_missing(
-                        logger,
-                        entry=duplicate,
-                        path=path,
-                        size_bytes=size_bytes,
-                        digest=digest,
-                        file_role=file_role,
-                        group_id=group_id,
-                        keeper_path=keeper.nas_path,
-                    )
-                    checked_paths += 1
-                    if matched:
-                        matched_paths += 1
-                    else:
-                        failed_paths += 1
-
-                for path, size_bytes, digest, file_role in verify_move_entry_destination_checks(duplicate, output_root):
-                    expected_destinations.add(path)
-                    matched = verify_move_log_destination_present(
-                        logger,
-                        entry=duplicate,
-                        path=path,
-                        size_bytes=size_bytes,
-                        digest=digest,
-                        file_role=file_role,
-                        group_id=group_id,
-                        keeper_path=keeper.nas_path,
-                    )
-                    checked_paths += 1
-                    if matched:
-                        matched_paths += 1
-                    else:
-                        failed_paths += 1
-
-        for path in verify_move_unexpected_outputs(output_root, expected_destinations, actual_log_path):
-            unexpected_outputs += 1
-            logger.row(
-                disposition="verify_move_unexpected_output",
-                event="verify_move_output_scan",
-                status="error",
-                source_path=path,
-                size_bytes=path.stat().st_size,
-                reason="unexpected_output_file",
-                message="output file is not an expected moved duplicate or sidecar",
-            )
-
-    return VerifyMoveResult(
-        log_path=actual_log_path,
-        checked_paths=checked_paths,
-        matched_paths=matched_paths,
-        failed_paths=failed_paths,
-        unexpected_outputs=unexpected_outputs,
-    )
+        return VerifyMoveResult(
+            log_path=actual_log_path,
+            checked_paths=checked_paths,
+            matched_paths=matched_paths,
+            failed_paths=failed_paths,
+            unexpected_outputs=unexpected_outputs,
+        )
+    finally:
+        progress.finish()
 
 
 def verify_move_groups(entries: list[ManifestEntry]) -> tuple[list[list[ManifestEntry]], list[ManifestEntry]]:
@@ -635,6 +751,22 @@ def verify_move_groups(entries: list[ManifestEntry]) -> tuple[list[list[Manifest
         else:
             groups.append(bucket)
     return groups, uniques
+
+
+def verify_move_expected_check_count(groups: list[list[ManifestEntry]], uniques: list[ManifestEntry]) -> int:
+    count = sum(len(verify_move_entry_source_checks(entry)) for entry in uniques)
+    for group in groups:
+        if verify_move_sidecar_conflict(group):
+            count += sum(len(verify_move_entry_source_checks(entry)) for entry in group)
+            continue
+        keeper = verify_move_choose_keeper(group)
+        count += len(verify_move_entry_source_checks(keeper))
+        for duplicate in group:
+            if duplicate == keeper:
+                continue
+            count += len(verify_move_entry_source_checks(duplicate))
+            count += len(verify_move_entry_destination_checks(duplicate, Path()))
+    return count
 
 
 def verify_move_sidecar_conflict(group: list[ManifestEntry]) -> bool:
@@ -822,12 +954,17 @@ def verify_move_existing_file_status(path: Path, size_bytes: int) -> tuple[str, 
     return "matched", ""
 
 
-def verify_move_unexpected_outputs(output_root: Path, expected_destinations: set[Path], log_path: Path) -> list[Path]:
-    if not output_root.is_dir():
-        return []
+def verify_move_unexpected_outputs(
+    output_entries: list[Path],
+    expected_destinations: set[Path],
+    log_path: Path,
+    progress: Progress | None = None,
+) -> list[Path]:
     resolved_log_path = log_path.resolve(strict=False)
     unexpected = []
-    for path in sorted(output_root.rglob("*")):
+    for path in output_entries:
+        if progress is not None:
+            progress.advance()
         if not path.is_file():
             continue
         if path.resolve(strict=False) == resolved_log_path:
@@ -841,87 +978,104 @@ def json_dumps(value: object) -> str:
     return json.dumps(value, separators=(",", ":"))
 
 
-def execute_plan(plan_path: Path, log_path: Path | None, move: bool) -> ExecutePlanResult:
-    bundles, orphan_sidecars, hash_field = load_plan_bundles(plan_path)
-    actual_log_path = log_path or default_log_path()
-    duplicate_destinations = duplicate_destination_paths(bundles)
-    mode = "execute_plan_move" if move else "execute_plan_dry_run"
-    moved_bundles = 0
-    planned_bundles = 0
-    already_moved_bundles = 0
-    skipped_bundles = 0
+def execute_plan(plan_path: Path, log_path: Path | None, move: bool, show_progress: bool = False) -> ExecutePlanResult:
+    progress = Progress(mode="execute_plan", total_images=0, enabled=show_progress)
+    try:
+        progress.start_phase("manifest-load-plan", count_csv_data_rows(plan_path))
+        bundles, orphan_sidecars, hash_field = load_plan_bundles(plan_path, progress)
+        actual_log_path = log_path or default_log_path()
+        duplicate_destinations = duplicate_destination_paths(bundles)
+        mode = "execute_plan_move" if move else "execute_plan_dry_run"
+        moved_bundles = 0
+        planned_bundles = 0
+        already_moved_bundles = 0
+        skipped_bundles = 0
 
-    actual_log_path.parent.mkdir(parents=True, exist_ok=True)
-    with actual_log_path.open("w", newline="", encoding="utf-8") as file:
-        logger = CsvLogger(file, mode=mode, hash_field=hash_field)
-        for sidecar in orphan_sidecars:
-            logger.row(
-                disposition="orphan_plan_sidecar",
-                event="execute_plan_orphan_sidecar",
-                status="skipped",
-                group_id=sidecar.group_id,
-                file_role="sidecar",
-                input_root=sidecar.row.get("input_root", ""),
-                source_path=sidecar.source_path,
-                destination_path=sidecar.destination_path,
-                keeper_path=sidecar.row.get("keeper_path", ""),
-                size_bytes=sidecar.size_bytes,
-                reason="orphan_plan_sidecar",
-                message="planned sidecar row has no matching planned primary row",
-            )
-
-        for bundle in bundles:
-            validation = validate_plan_bundle(bundle, duplicate_destinations)
-            if validation == "already_moved":
-                already_moved_bundles += 1
-                log_bundle(logger, bundle, disposition_prefix="already_moved", status="kept", reason="already_moved")
-                continue
-            if validation is not None:
-                skipped_bundles += 1
-                log_bundle(logger, bundle, disposition_prefix="kept_error", status="error", reason=validation)
-                continue
-            if not move:
-                planned_bundles += 1
-                log_bundle(logger, bundle, disposition_prefix="planned", status="planned", reason="validated")
-                continue
-
-            moved_sources: list[tuple[Path, Path]] = []
-            try:
-                for row in bundle_rows(bundle):
-                    row.destination_path.parent.mkdir(parents=True, exist_ok=True)
-                    shutil.move(str(row.source_path), str(row.destination_path))
-                    moved_sources.append((row.source_path, row.destination_path))
-            except OSError as error:
-                rollback_errors = rollback_moves(moved_sources)
-                skipped_bundles += 1
-                message = f"move failed: {error}"
-                if rollback_errors:
-                    message += f"; rollback errors: {'; '.join(rollback_errors)}"
-                log_bundle(
-                    logger,
-                    bundle,
-                    disposition_prefix="kept_error",
-                    status="error",
-                    reason="move_failed",
-                    message=message,
+        progress.start_phase("manifest-execute", len(orphan_sidecars) + len(bundles))
+        actual_log_path.parent.mkdir(parents=True, exist_ok=True)
+        with actual_log_path.open("w", newline="", encoding="utf-8") as file:
+            logger = CsvLogger(file, mode=mode, hash_field=hash_field)
+            for sidecar in orphan_sidecars:
+                logger.row(
+                    disposition="orphan_plan_sidecar",
+                    event="execute_plan_orphan_sidecar",
+                    status="skipped",
+                    group_id=sidecar.group_id,
+                    file_role="sidecar",
+                    input_root=sidecar.row.get("input_root", ""),
+                    source_path=sidecar.source_path,
+                    destination_path=sidecar.destination_path,
+                    keeper_path=sidecar.row.get("keeper_path", ""),
+                    size_bytes=sidecar.size_bytes,
+                    reason="orphan_plan_sidecar",
+                    message="planned sidecar row has no matching planned primary row",
                 )
-                continue
+                progress.error()
+                progress.manifest_bundle_processed()
 
-            moved_bundles += 1
-            log_bundle(logger, bundle, disposition_prefix="moved", status="moved", reason="executed")
+            for bundle in bundles:
+                validation = validate_plan_bundle(bundle, duplicate_destinations)
+                if validation == "already_moved":
+                    already_moved_bundles += 1
+                    log_bundle(logger, bundle, disposition_prefix="already_moved", status="kept", reason="already_moved")
+                    progress.manifest_bundle_processed()
+                    continue
+                if validation is not None:
+                    skipped_bundles += 1
+                    log_bundle(logger, bundle, disposition_prefix="kept_error", status="error", reason=validation)
+                    progress.error()
+                    progress.manifest_bundle_processed()
+                    continue
+                if not move:
+                    planned_bundles += 1
+                    progress.manifest_planned_move(len(bundle_rows(bundle)))
+                    log_bundle(logger, bundle, disposition_prefix="planned", status="planned", reason="validated")
+                    progress.manifest_bundle_processed()
+                    continue
 
-    return ExecutePlanResult(
-        log_path=actual_log_path,
-        bundles=len(bundles),
-        moved_bundles=moved_bundles,
-        planned_bundles=planned_bundles,
-        already_moved_bundles=already_moved_bundles,
-        skipped_bundles=skipped_bundles,
-        orphan_sidecars=len(orphan_sidecars),
-    )
+                moved_sources: list[tuple[Path, Path]] = []
+                try:
+                    for row in bundle_rows(bundle):
+                        row.destination_path.parent.mkdir(parents=True, exist_ok=True)
+                        shutil.move(str(row.source_path), str(row.destination_path))
+                        progress.moved(row.size_bytes)
+                        moved_sources.append((row.source_path, row.destination_path))
+                except OSError as error:
+                    rollback_errors = rollback_moves(moved_sources)
+                    skipped_bundles += 1
+                    message = f"move failed: {error}"
+                    if rollback_errors:
+                        message += f"; rollback errors: {'; '.join(rollback_errors)}"
+                    log_bundle(
+                        logger,
+                        bundle,
+                        disposition_prefix="kept_error",
+                        status="error",
+                        reason="move_failed",
+                        message=message,
+                    )
+                    progress.error()
+                    progress.manifest_bundle_processed()
+                    continue
+
+                moved_bundles += 1
+                log_bundle(logger, bundle, disposition_prefix="moved", status="moved", reason="executed")
+                progress.manifest_bundle_processed()
+
+        return ExecutePlanResult(
+            log_path=actual_log_path,
+            bundles=len(bundles),
+            moved_bundles=moved_bundles,
+            planned_bundles=planned_bundles,
+            already_moved_bundles=already_moved_bundles,
+            skipped_bundles=skipped_bundles,
+            orphan_sidecars=len(orphan_sidecars),
+        )
+    finally:
+        progress.finish()
 
 
-def load_plan_bundles(plan_path: Path) -> tuple[list[PlanBundle], list[PlanRow], str]:
+def load_plan_bundles(plan_path: Path, progress: Progress | None = None) -> tuple[list[PlanBundle], list[PlanRow], str]:
     with plan_path.open(newline="", encoding="utf-8") as file:
         reader = csv.DictReader(file)
         fieldnames = reader.fieldnames or []
@@ -934,6 +1088,9 @@ def load_plan_bundles(plan_path: Path) -> tuple[list[PlanBundle], list[PlanRow],
         sidecars: list[PlanRow] = []
         keepers: dict[str, PlanRow] = {}
         for row in reader:
+            if progress is not None:
+                progress.manifest_plan_row_loaded()
+                progress.advance()
             disposition = row["disposition"]
             if disposition not in {"planned_duplicate_primary", "planned_sidecar", "kept_duplicate_keeper"}:
                 continue
@@ -960,6 +1117,13 @@ def load_plan_bundles(plan_path: Path) -> tuple[list[PlanBundle], list[PlanRow],
         bundles.append(PlanBundle(keeper=keepers.get(primary.group_id), primary=primary, sidecars=bundle_sidecars))
     orphans = [sidecar for sidecar in sidecars if id(sidecar) not in matched_sidecars]
     return bundles, orphans, hash_field
+
+
+def count_csv_data_rows(path: Path) -> int:
+    with path.open(newline="", encoding="utf-8") as file:
+        reader = csv.reader(file)
+        next(reader, None)
+        return sum(1 for _ in reader)
 
 
 def parse_plan_row(row: dict[str, str], hash_field: str, require_destination: bool) -> PlanRow:

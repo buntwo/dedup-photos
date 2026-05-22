@@ -33,6 +33,8 @@ uv run dedup-photos-manifest manifest /local/project/google_photos \
 
 This writes `/local/project/google_photos.manifest.csv` by default. Then `/local/project/google_photos/2021/img.jpg` is recorded in the manifest as `/my/nas/google_photos/2021/img.jpg`.
 
+The manifest output file must not already exist; the command exits instead of overwriting it. The NAS root must also be mounted/readable, have the same basename as the local batch root, and have matching directories through two levels as a quick wrong-root check.
+
 ```bash
 uv run dedup-photos-manifest manifest /local/batch/google-photos \
   --nas-root "/volume1/photo/google photos"
@@ -83,7 +85,7 @@ Every run writes a CSV log. Pass `--log path/to/log.csv` to choose the path; oth
 
 The CSV has a `disposition` column for one-column filtering, including values such as `kept_unique_primary`, `kept_duplicate_keeper`, `planned_duplicate_primary`, `moved_duplicate_primary`, `kept_error`, `verify_matched`, and `verify_failed`.
 
-While running from the CLI, progress is printed on stderr with processed files, processed image count, percent done, moved/planned file count, errors, and the current kept-set size.
+While running from the CLI, progress is printed on stderr. Direct mode shows scan/hash/action phases. Manifest mode shows manifest hashing, CSV loading/planning, byte verification, plan execution, and move verification counters. Every progress line includes a phase-local percentage.
 
 Moved files keep a parallel structure under the output directory, including the input root name:
 
