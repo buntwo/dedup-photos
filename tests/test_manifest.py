@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import csv
-import json
 from pathlib import Path
 
 import pytest
@@ -106,22 +105,60 @@ def test_generate_manifest_stores_nas_paths_and_sidecars(tmp_path: Path) -> None
     manifest_path = tmp_path / "batch.csv"
     write(local_root / "2024" / "photo.HEIC", b"image")
     write(local_root / "2024" / "photo.MOV", b"video")
+    write(local_root / "2024" / "photo.HEIC.json", b"metadata")
+    write(local_root / "2024" / "photo.supplemental-metadata.json", b"not yet")
     prepare_nas_root(local_root, tmp_path / "nas")
 
     generate_manifest(local_root, nas_root, manifest_path)
 
     manifest_rows = rows(manifest_path)
-    assert len(manifest_rows) == 1
-    row = manifest_rows[0]
-    assert row["nas_path"] == str(nas_root / "2024" / "photo.HEIC")
-    assert row["relative_path"] == "2024/photo.HEIC"
-    assert row["size_bytes"] == "5"
-    assert row["xxh128"]
-    assert row["sidecar_count"] == "1"
-    assert json.loads(row["sidecar_paths"]) == [str(nas_root / "2024" / "photo.MOV")]
-    assert json.loads(row["sidecar_relative_paths"]) == ["2024/photo.MOV"]
-    assert json.loads(row["sidecar_sizes"]) == [5]
-    assert len(json.loads(row["sidecar_xxh128s"])[0]) == 32
+    assert len(manifest_rows) == 4
+    by_relative = {row["relative_path"]: row for row in manifest_rows}
+    primary = by_relative["2024/photo.HEIC"]
+    assert primary["file_role"] == "primary"
+    assert primary["status"] == "included"
+    assert primary["reason"] == ""
+    assert primary["group_id"] == "f000001"
+    assert primary["nas_path"] == str(nas_root / "2024" / "photo.HEIC")
+    assert primary["size_bytes"] == "5"
+    assert primary["xxh128"]
+
+    takeout_json = by_relative["2024/photo.HEIC.json"]
+    live_video = by_relative["2024/photo.MOV"]
+    assert takeout_json["file_role"] == "sidecar"
+    assert live_video["file_role"] == "sidecar"
+    assert takeout_json["group_id"] == primary["group_id"]
+    assert live_video["group_id"] == primary["group_id"]
+    assert takeout_json["primary_nas_path"] == primary["nas_path"]
+    assert live_video["primary_relative_path"] == "2024/photo.HEIC"
+    assert takeout_json["xxh128"]
+    assert live_video["xxh128"]
+
+    uncategorized = by_relative["2024/photo.supplemental-metadata.json"]
+    assert uncategorized["file_role"] == "uncategorized"
+    assert uncategorized["status"] == "skipped"
+    assert uncategorized["reason"] == "unrecognized_non_primary"
+    assert uncategorized["group_id"] == ""
+    assert uncategorized["xxh128"]
+
+
+def test_generate_manifest_marks_ambiguous_sidecar_as_uncategorized(tmp_path: Path) -> None:
+    local_root = tmp_path / "google_photos"
+    nas_root = tmp_path / "nas" / "google_photos"
+    manifest_path = tmp_path / "manifest.csv"
+    write(local_root / "photo.jpg", b"image-one")
+    write(local_root / "photo.jpg.png", b"image-two")
+    write(local_root / "photo.jpg.json", b"metadata")
+    prepare_nas_root(local_root, tmp_path / "nas")
+
+    generate_manifest(local_root, nas_root, manifest_path)
+
+    ambiguous = [row for row in rows(manifest_path) if row["relative_path"] == "photo.jpg.json"][0]
+    assert ambiguous["file_role"] == "uncategorized"
+    assert ambiguous["status"] == "skipped"
+    assert ambiguous["reason"] == "ambiguous_sidecar_multiple_primaries"
+    assert ambiguous["group_id"] == ""
+    assert ambiguous["xxh128"]
 
 
 def test_generate_manifest_refuses_existing_manifest_path(tmp_path: Path) -> None:
@@ -255,7 +292,16 @@ def test_plan_from_manifests_skips_sidecar_conflicts(tmp_path: Path) -> None:
 
     assert result.skipped_groups == 1
     plan_rows = rows(log_path)
-    assert [row for row in plan_rows if row["event"] == "duplicate_group_skipped"][0]["reason"] == "unresolved_sidecar_conflict"
+    conflict_rows = [row for row in plan_rows if row["disposition"] == "kept_sidecar_conflict"]
+    assert len(conflict_rows) == 2
+    assert {row["reason"] for row in conflict_rows} == {"unresolved_sidecar_conflict"}
+    conflict_sidecar_rows = [row for row in plan_rows if row["disposition"] == "kept_sidecar_conflict_sidecar"]
+    assert len(conflict_sidecar_rows) == 2
+    assert {row["file_role"] for row in conflict_sidecar_rows} == {"sidecar"}
+    assert {Path(row["source_path"]).name for row in conflict_sidecar_rows} == {"photo.json"}
+    assert all(row["xxh128"] for row in conflict_sidecar_rows)
+    assert all(row["source_path"] for row in plan_rows)
+    assert not [row for row in plan_rows if row["event"] == "duplicate_group_skipped"]
     assert not [row for row in plan_rows if row["event"] == "duplicate_primary_move"]
 
 
@@ -406,6 +452,7 @@ def test_plan_from_manifests_emits_sidecar_move_destinations(tmp_path: Path) -> 
     assert len(sidecar_rows) == 1
     assert sidecar_rows[0]["source_path"] == str(nas_two / "a" / "photo.mov")
     assert sidecar_rows[0]["destination_path"] == "/dupes/two/a/photo.mov"
+    assert sidecar_rows[0]["xxh128"]
 
 
 def test_plan_from_manifests_preserves_date_takeout_mobilebackup_precedence(tmp_path: Path) -> None:
@@ -471,15 +518,13 @@ def test_load_manifest_rejects_unsupported_version(tmp_path: Path) -> None:
             "batch_root": "/local",
             "nas_root": "/nas",
             "nas_root_label": "nas",
+            "group_id": "f000001",
+            "file_role": "primary",
+            "status": "included",
             "nas_path": "/nas/photo.jpg",
             "relative_path": "photo.jpg",
             "size_bytes": "1",
             "xxh128": "abc",
-            "sidecar_count": "0",
-            "sidecar_paths": "[]",
-            "sidecar_relative_paths": "[]",
-            "sidecar_sizes": "[]",
-            "sidecar_xxh128s": "[]",
         }
     )
     write_rows(manifest_path, [row])
@@ -488,7 +533,7 @@ def test_load_manifest_rejects_unsupported_version(tmp_path: Path) -> None:
         plan_from_manifests([manifest_path], Path("/dupes"), tmp_path / "plan.csv")
 
 
-def test_load_manifest_rejects_sidecar_length_mismatch(tmp_path: Path) -> None:
+def test_load_manifest_rejects_sidecar_without_primary(tmp_path: Path) -> None:
     manifest_path = tmp_path / "bad.csv"
     row = {
         field: ""
@@ -500,20 +545,20 @@ def test_load_manifest_rejects_sidecar_length_mismatch(tmp_path: Path) -> None:
             "batch_root": "/local",
             "nas_root": "/nas",
             "nas_root_label": "nas",
-            "nas_path": "/nas/photo.jpg",
-            "relative_path": "photo.jpg",
+            "group_id": "f000001",
+            "file_role": "sidecar",
+            "status": "included",
+            "nas_path": "/nas/photo.mov",
+            "relative_path": "photo.mov",
+            "primary_nas_path": "/nas/photo.jpg",
+            "primary_relative_path": "photo.jpg",
             "size_bytes": "1",
             "xxh128": "abc",
-            "sidecar_count": "1",
-            "sidecar_paths": "[]",
-            "sidecar_relative_paths": "[]",
-            "sidecar_sizes": "[]",
-            "sidecar_xxh128s": "[]",
         }
     )
     write_rows(manifest_path, [row])
 
-    with pytest.raises(ValueError, match="sidecar field length mismatch"):
+    with pytest.raises(ValueError, match="no primary"):
         plan_from_manifests([manifest_path], Path("/dupes"), tmp_path / "plan.csv")
 
 

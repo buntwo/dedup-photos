@@ -35,6 +35,8 @@ This writes `/local/project/google_photos.manifest.csv` by default. Then `/local
 
 The manifest output file must not already exist; the command exits instead of overwriting it. The NAS root must also be mounted/readable, have the same basename as the local batch root, and have matching directories through two levels as a quick wrong-root check.
 
+The manifest is a file inventory: it has one data row per regular non-symlink file under the local batch root. Rows are marked as `primary`, `sidecar`, or `uncategorized`; primary rows and their recognized sidecar rows share a `group_id`. Uncategorized rows are hashed and kept for debugging, but do not participate in duplicate planning.
+
 ```bash
 uv run dedup-photos-manifest manifest /local/batch/google-photos \
   --nas-root "/volume1/photo/google photos"
@@ -66,7 +68,7 @@ uv run dedup-photos-manifest execute-plan manifest_move_plan.csv \
   --log manifest_execute.csv
 ```
 
-Manifest mode uses file size plus `xxh128` for primary image identity and records sidecar paths, sizes, and hashes so keeper precedence can be computed offline. Optional byte-level verification rereads the NAS paths referenced by the manifests:
+Manifest mode uses file size plus `xxh128` for primary image identity. Sidecar rows are used for keeper precedence and for moving duplicate bundles. Optional byte-level verification rereads the NAS paths referenced by primary rows in the manifests:
 
 ```bash
 uv run dedup-photos-manifest verify-bytes /local/batch/google-photos.manifest.csv /local/batch/backups.manifest.csv \

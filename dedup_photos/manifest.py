@@ -1,14 +1,13 @@
 from __future__ import annotations
 
 import csv
-import json
 import re
 import shutil
 from collections import defaultdict
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Iterable, TextIO
+from typing import Iterable
 
 import xxhash
 
@@ -17,10 +16,10 @@ from dedup_photos.deduper import (
     CsvLogger,
     date_directory_score,
     default_log_path,
-    find_sidecars,
     has_mobilebackup_segment,
     has_takeout_segment,
     is_primary_image,
+    sidecar_belongs_to_primary,
 )
 from dedup_photos.progress import Progress
 
@@ -31,15 +30,16 @@ MANIFEST_FIELDS = [
     "batch_root",
     "nas_root",
     "nas_root_label",
+    "group_id",
+    "file_role",
+    "status",
+    "reason",
     "nas_path",
     "relative_path",
+    "primary_nas_path",
+    "primary_relative_path",
     "size_bytes",
     "xxh128",
-    "sidecar_count",
-    "sidecar_paths",
-    "sidecar_relative_paths",
-    "sidecar_sizes",
-    "sidecar_xxh128s",
 ]
 
 VERIFY_MOVE_DATE_DIRECTORY_TOKEN_RE = re.compile(r"(?<!\d)(?:\d{4}-\d{2}-\d{2}|\d{8}|\d{4})(?!\d)")
@@ -59,6 +59,24 @@ class ManifestEntry:
     sidecar_relative_paths: tuple[Path, ...]
     sidecar_sizes: tuple[int, ...]
     sidecar_xxh128s: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class ManifestInventoryRow:
+    manifest_path: Path
+    batch_root: str
+    nas_root: str
+    nas_root_label: str
+    group_id: str
+    file_role: str
+    status: str
+    reason: str
+    nas_path: Path
+    relative_path: Path
+    primary_nas_path: Path | None
+    primary_relative_path: Path | None
+    size_bytes: int
+    xxh128: str
 
 
 @dataclass(frozen=True)
@@ -147,42 +165,149 @@ def generate_manifest(
 
     try:
         paths = sorted(local_root.rglob("*"))
-        progress.start_phase("manifest-hash", len(paths))
+        regular_files = tuple(path for path in paths if not path.is_symlink() and path.is_file())
+        primary_paths = tuple(path for path in regular_files if is_primary_image(path))
+        sidecars_by_primary, uncategorized = classify_manifest_files(regular_files, primary_paths)
+        group_ids = {
+            path: f"f{index:06d}"
+            for index, path in enumerate(
+                sorted(primary_paths, key=lambda item: item.relative_to(local_root).as_posix()),
+                start=1,
+            )
+        }
+        progress.start_phase("manifest-hash", len(regular_files))
         manifest_path.parent.mkdir(parents=True, exist_ok=True)
         with manifest_path.open("w", newline="", encoding="utf-8") as file:
             writer = csv.DictWriter(file, fieldnames=MANIFEST_FIELDS)
             writer.writeheader()
-            for path in paths:
-                progress.manifest_entry_scanned()
-                if path.is_symlink() or not path.is_file() or not is_primary_image(path):
-                    continue
+            for path in sorted(primary_paths, key=lambda item: item.relative_to(local_root).as_posix()):
                 relative_path = path.relative_to(local_root)
-                sidecars = tuple(find_sidecars(path))
-                sidecar_relative_paths = tuple(sidecar.relative_to(local_root) for sidecar in sidecars)
-                sidecar_sizes = tuple(sidecar.stat().st_size for sidecar in sidecars)
-                sidecar_hashes = tuple(hash_file_xxh128(sidecar, progress, "sidecar") for sidecar in sidecars)
-                writer.writerow(
-                    {
-                        "manifest_version": MANIFEST_VERSION,
-                        "created_at": created_at,
-                        "batch_root": str(local_root),
-                        "nas_root": nas_root_str,
-                        "nas_root_label": nas_root_label,
-                        "nas_path": str(nas_root / relative_path),
-                        "relative_path": relative_path.as_posix(),
-                        "size_bytes": path.stat().st_size,
-                        "xxh128": hash_file_xxh128(path, progress, "primary"),
-                        "sidecar_count": len(sidecars),
-                        "sidecar_paths": json_dumps([str(nas_root / relative) for relative in sidecar_relative_paths]),
-                        "sidecar_relative_paths": json_dumps([relative.as_posix() for relative in sidecar_relative_paths]),
-                        "sidecar_sizes": json_dumps(sidecar_sizes),
-                        "sidecar_xxh128s": json_dumps(sidecar_hashes),
-                    }
+                write_manifest_file_row(
+                    writer,
+                    path=path,
+                    local_root=local_root,
+                    nas_root=nas_root,
+                    manifest_version=MANIFEST_VERSION,
+                    created_at=created_at,
+                    batch_root=str(local_root),
+                    nas_root_str=nas_root_str,
+                    nas_root_label=nas_root_label,
+                    group_id=group_ids[path],
+                    file_role="primary",
+                    status="included",
+                    reason="",
+                    primary_path=None,
+                    progress=progress,
                 )
-                progress.manifest_row_written()
+                for sidecar in sorted(
+                    sidecars_by_primary[path],
+                    key=lambda item: item.relative_to(local_root).as_posix(),
+                ):
+                    write_manifest_file_row(
+                        writer,
+                        path=sidecar,
+                        local_root=local_root,
+                        nas_root=nas_root,
+                        manifest_version=MANIFEST_VERSION,
+                        created_at=created_at,
+                        batch_root=str(local_root),
+                        nas_root_str=nas_root_str,
+                        nas_root_label=nas_root_label,
+                        group_id=group_ids[path],
+                        file_role="sidecar",
+                        status="included",
+                        reason="",
+                        primary_path=path,
+                        progress=progress,
+                    )
+            for path in sorted(uncategorized, key=lambda item: item.relative_to(local_root).as_posix()):
+                write_manifest_file_row(
+                    writer,
+                    path=path,
+                    local_root=local_root,
+                    nas_root=nas_root,
+                    manifest_version=MANIFEST_VERSION,
+                    created_at=created_at,
+                    batch_root=str(local_root),
+                    nas_root_str=nas_root_str,
+                    nas_root_label=nas_root_label,
+                    group_id="",
+                    file_role="uncategorized",
+                    status="skipped",
+                    reason=uncategorized[path],
+                    primary_path=None,
+                    progress=progress,
+                )
     finally:
         progress.finish()
     return manifest_path
+
+
+def classify_manifest_files(
+    regular_files: tuple[Path, ...],
+    primary_paths: tuple[Path, ...],
+) -> tuple[dict[Path, list[Path]], dict[Path, str]]:
+    sidecars_by_primary: dict[Path, list[Path]] = {path: [] for path in primary_paths}
+    uncategorized: dict[Path, str] = {}
+    primary_set = set(primary_paths)
+    for path in regular_files:
+        if path in primary_set:
+            continue
+        matches = [
+            primary
+            for primary in primary_paths
+            if primary.parent == path.parent and sidecar_belongs_to_primary(path, primary)
+        ]
+        if len(matches) == 1:
+            sidecars_by_primary[matches[0]].append(path)
+        elif len(matches) > 1:
+            uncategorized[path] = "ambiguous_sidecar_multiple_primaries"
+        else:
+            uncategorized[path] = "unrecognized_non_primary"
+    return sidecars_by_primary, uncategorized
+
+
+def write_manifest_file_row(
+    writer: csv.DictWriter,
+    *,
+    path: Path,
+    local_root: Path,
+    nas_root: Path,
+    manifest_version: str,
+    created_at: str,
+    batch_root: str,
+    nas_root_str: str,
+    nas_root_label: str,
+    group_id: str,
+    file_role: str,
+    status: str,
+    reason: str,
+    primary_path: Path | None,
+    progress: Progress,
+) -> None:
+    progress.manifest_entry_scanned()
+    relative_path = path.relative_to(local_root)
+    primary_relative_path = primary_path.relative_to(local_root) if primary_path is not None else None
+    writer.writerow(
+        {
+            "manifest_version": manifest_version,
+            "created_at": created_at,
+            "batch_root": batch_root,
+            "nas_root": nas_root_str,
+            "nas_root_label": nas_root_label,
+            "group_id": group_id,
+            "file_role": file_role,
+            "status": status,
+            "reason": reason,
+            "nas_path": str(nas_root / relative_path),
+            "relative_path": relative_path.as_posix(),
+            "primary_nas_path": str(nas_root / primary_relative_path) if primary_relative_path is not None else "",
+            "primary_relative_path": primary_relative_path.as_posix() if primary_relative_path is not None else "",
+            "size_bytes": path.stat().st_size,
+            "xxh128": hash_file_xxh128(path, progress, file_role),
+        }
+    )
+    progress.manifest_row_written()
 
 
 def validate_manifest_roots(local_root: Path, nas_root: Path, structure_depth: int = 2) -> None:
@@ -226,47 +351,95 @@ def directory_relative_paths(root: Path, max_depth: int) -> set[Path]:
 def load_manifests(manifest_paths: Iterable[Path], progress: Progress | None = None) -> list[ManifestEntry]:
     entries: list[ManifestEntry] = []
     for manifest_path in manifest_paths:
+        primaries: dict[tuple[Path, str], ManifestInventoryRow] = {}
+        sidecars: dict[tuple[Path, str], list[ManifestInventoryRow]] = defaultdict(list)
         with manifest_path.open(newline="", encoding="utf-8") as file:
             reader = csv.DictReader(file)
             missing = set(MANIFEST_FIELDS) - set(reader.fieldnames or [])
             if missing:
                 raise ValueError(f"manifest missing required fields {sorted(missing)}: {manifest_path}")
             for row in reader:
-                if row["manifest_version"] != MANIFEST_VERSION:
-                    raise ValueError(f"unsupported manifest version {row['manifest_version']}: {manifest_path}")
-                sidecar_paths = tuple(Path(value) for value in json.loads(row["sidecar_paths"]))
-                sidecar_relative_paths = tuple(Path(value) for value in json.loads(row["sidecar_relative_paths"]))
-                sidecar_sizes = tuple(int(value) for value in json.loads(row["sidecar_sizes"]))
-                sidecar_hashes = tuple(str(value) for value in json.loads(row["sidecar_xxh128s"]))
-                if not (
-                    int(row["sidecar_count"])
-                    == len(sidecar_paths)
-                    == len(sidecar_relative_paths)
-                    == len(sidecar_sizes)
-                    == len(sidecar_hashes)
-                ):
-                    raise ValueError(f"sidecar field length mismatch in manifest: {manifest_path}")
-                entries.append(
-                    ManifestEntry(
-                        manifest_path=manifest_path,
-                        batch_root=row["batch_root"],
-                        nas_root=row["nas_root"],
-                        nas_root_label=row["nas_root_label"],
-                        nas_path=Path(row["nas_path"]),
-                        relative_path=Path(row["relative_path"]),
-                        size_bytes=int(row["size_bytes"]),
-                        xxh128=row["xxh128"],
-                        sidecar_paths=sidecar_paths,
-                        sidecar_relative_paths=sidecar_relative_paths,
-                        sidecar_sizes=sidecar_sizes,
-                        sidecar_xxh128s=sidecar_hashes,
-                    )
-                )
+                inventory_row = parse_manifest_inventory_row(row, manifest_path)
+                if inventory_row.file_role == "primary":
+                    if not inventory_row.group_id:
+                        raise ValueError(f"primary manifest row missing group_id: {manifest_path}")
+                    key = (manifest_path, inventory_row.group_id)
+                    if key in primaries:
+                        raise ValueError(f"multiple primary rows for group_id {inventory_row.group_id}: {manifest_path}")
+                    primaries[key] = inventory_row
+                elif inventory_row.file_role == "sidecar":
+                    if not inventory_row.group_id:
+                        raise ValueError(f"sidecar manifest row missing group_id: {manifest_path}")
+                    sidecars[(manifest_path, inventory_row.group_id)].append(inventory_row)
                 if progress is not None:
                     progress.manifest_entry_loaded()
+        for key in sidecars:
+            if key not in primaries:
+                raise ValueError(f"sidecar manifest rows have no primary for group_id {key[1]}: {manifest_path}")
+        for key, primary in primaries.items():
+            grouped_sidecars = tuple(sorted(sidecars.get(key, []), key=lambda item: item.relative_path.as_posix()))
+            for sidecar in grouped_sidecars:
+                if (
+                    sidecar.primary_nas_path != primary.nas_path
+                    or sidecar.primary_relative_path != primary.relative_path
+                ):
+                    raise ValueError(f"sidecar manifest row points at a different primary for group_id {key[1]}: {manifest_path}")
+            entries.append(
+                ManifestEntry(
+                    manifest_path=manifest_path,
+                    batch_root=primary.batch_root,
+                    nas_root=primary.nas_root,
+                    nas_root_label=primary.nas_root_label,
+                    nas_path=primary.nas_path,
+                    relative_path=primary.relative_path,
+                    size_bytes=primary.size_bytes,
+                    xxh128=primary.xxh128,
+                    sidecar_paths=tuple(sidecar.nas_path for sidecar in grouped_sidecars),
+                    sidecar_relative_paths=tuple(sidecar.relative_path for sidecar in grouped_sidecars),
+                    sidecar_sizes=tuple(sidecar.size_bytes for sidecar in grouped_sidecars),
+                    sidecar_xxh128s=tuple(sidecar.xxh128 for sidecar in grouped_sidecars),
+                )
+            )
         if progress is not None:
             progress.manifest_manifest_loaded()
     return collapse_duplicate_manifest_paths(entries)
+
+
+def parse_manifest_inventory_row(row: dict[str, str], manifest_path: Path) -> ManifestInventoryRow:
+    if row["manifest_version"] != MANIFEST_VERSION:
+        raise ValueError(f"unsupported manifest version {row['manifest_version']}: {manifest_path}")
+    file_role = row["file_role"]
+    if file_role not in {"primary", "sidecar", "uncategorized"}:
+        raise ValueError(f"unsupported manifest file_role {file_role!r}: {manifest_path}")
+    status = row["status"]
+    if status not in {"included", "skipped"}:
+        raise ValueError(f"unsupported manifest status {status!r}: {manifest_path}")
+    try:
+        size_bytes = int(row["size_bytes"])
+    except ValueError as error:
+        raise ValueError(f"invalid manifest size_bytes {row['size_bytes']!r}: {manifest_path}") from error
+    primary_nas_path = Path(row["primary_nas_path"]) if row["primary_nas_path"] else None
+    primary_relative_path = Path(row["primary_relative_path"]) if row["primary_relative_path"] else None
+    if file_role == "sidecar" and (primary_nas_path is None or primary_relative_path is None):
+        raise ValueError(f"sidecar manifest row missing primary path fields: {manifest_path}")
+    if file_role != "sidecar" and (primary_nas_path is not None or primary_relative_path is not None):
+        raise ValueError(f"non-sidecar manifest row has primary path fields: {manifest_path}")
+    return ManifestInventoryRow(
+        manifest_path=manifest_path,
+        batch_root=row["batch_root"],
+        nas_root=row["nas_root"],
+        nas_root_label=row["nas_root_label"],
+        group_id=row["group_id"],
+        file_role=file_role,
+        status=status,
+        reason=row["reason"],
+        nas_path=Path(row["nas_path"]),
+        relative_path=Path(row["relative_path"]),
+        primary_nas_path=primary_nas_path,
+        primary_relative_path=primary_relative_path,
+        size_bytes=size_bytes,
+        xxh128=row["xxh128"],
+    )
 
 
 def collapse_duplicate_manifest_paths(entries: list[ManifestEntry]) -> list[ManifestEntry]:
@@ -420,18 +593,6 @@ def manifest_sort_key(entry: ManifestEntry) -> tuple[str, str]:
 
 
 def log_manifest_sidecar_conflict(logger: CsvLogger, group_id: str, group: list[ManifestEntry]) -> None:
-    digest = group[0].xxh128
-    size_bytes = group[0].size_bytes
-    logger.row(
-        disposition="skipped_sidecar_conflict_group",
-        event="duplicate_group_skipped",
-        status="skipped",
-        group_id=group_id,
-        size_bytes=size_bytes,
-        digest=digest,
-        reason="unresolved_sidecar_conflict",
-        message="manifest duplicate group has conflicting sidecars",
-    )
     for entry in group:
         logger.row(
             disposition="kept_sidecar_conflict",
@@ -445,6 +606,24 @@ def log_manifest_sidecar_conflict(logger: CsvLogger, group_id: str, group: list[
             digest=entry.xxh128,
             reason="unresolved_sidecar_conflict",
         )
+        for sidecar_path, sidecar_size, sidecar_hash in zip(
+            entry.sidecar_paths,
+            entry.sidecar_sizes,
+            entry.sidecar_xxh128s,
+            strict=True,
+        ):
+            logger.row(
+                disposition="kept_sidecar_conflict_sidecar",
+                event="sidecar_kept_due_to_sidecar_conflict",
+                status="skipped",
+                group_id=group_id,
+                file_role="sidecar",
+                input_root=entry.nas_root_label,
+                source_path=sidecar_path,
+                size_bytes=sidecar_size,
+                digest=sidecar_hash,
+                reason="unresolved_sidecar_conflict",
+            )
 
 
 def log_manifest_duplicate_plan(
@@ -468,10 +647,11 @@ def log_manifest_duplicate_plan(
         digest=duplicate.xxh128,
         reason="duplicate_of_keeper",
     )
-    for path, relative_path, size_bytes in zip(
+    for path, relative_path, size_bytes, digest in zip(
         duplicate.sidecar_paths,
         duplicate.sidecar_relative_paths,
         duplicate.sidecar_sizes,
+        duplicate.sidecar_xxh128s,
         strict=True,
     ):
         logger.row(
@@ -485,6 +665,7 @@ def log_manifest_duplicate_plan(
             destination_path=manifest_destination_for(output_root, duplicate.nas_root_label, relative_path),
             keeper_path=keeper.nas_path,
             size_bytes=size_bytes,
+            digest=digest,
             reason="duplicate_of_keeper",
         )
 
@@ -972,10 +1153,6 @@ def verify_move_unexpected_outputs(
         if path not in expected_destinations:
             unexpected.append(path)
     return unexpected
-
-
-def json_dumps(value: object) -> str:
-    return json.dumps(value, separators=(",", ":"))
 
 
 def execute_plan(plan_path: Path, log_path: Path | None, move: bool, show_progress: bool = False) -> ExecutePlanResult:

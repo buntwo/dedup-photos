@@ -32,6 +32,19 @@ def events(log_rows: list[dict[str, str]], event: str) -> list[dict[str, str]]:
     return [row for row in log_rows if row["event"] == event]
 
 
+def test_find_sidecars_accepts_full_primary_filename_prefix(tmp_path: Path) -> None:
+    primary = write(tmp_path / "IMG_1234.HEIC", b"image")
+    same_stem = write(tmp_path / "IMG_1234.MOV", b"live")
+    takeout_json = write(tmp_path / "IMG_1234.HEIC.json", b"metadata")
+    ignored_stem_suffix = write(tmp_path / "IMG_1234.supplemental-metadata.json", b"not yet")
+    ignored_primary = write(tmp_path / "IMG_1234.HEIC.edited.jpg", b"primary")
+
+    sidecars = deduper.find_sidecars(primary)
+    assert sidecars == [takeout_json, same_stem]
+    assert ignored_stem_suffix not in sidecars
+    assert ignored_primary not in sidecars
+
+
 def test_dry_run_logs_moves_without_touching_files(tmp_path: Path) -> None:
     input_root = tmp_path / "IN_1"
     output_root = tmp_path / "OUT"

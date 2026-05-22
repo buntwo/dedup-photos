@@ -32,6 +32,7 @@ class Progress:
     manifest_entries_scanned: int = 0
     manifest_primaries_hashed: int = 0
     manifest_sidecars_hashed: int = 0
+    manifest_uncategorized_hashed: int = 0
     manifest_bytes_hashed: int = 0
     manifest_bytes_compared: int = 0
     manifest_rows_written: int = 0
@@ -130,6 +131,8 @@ class Progress:
     def manifest_file_hashed(self, file_role: str) -> None:
         if file_role == "sidecar":
             self.manifest_sidecars_hashed += 1
+        elif file_role == "uncategorized":
+            self.manifest_uncategorized_hashed += 1
         else:
             self.manifest_primaries_hashed += 1
         self.render()
@@ -240,6 +243,7 @@ class Progress:
                 f"entries_scanned={self.manifest_entries_scanned}",
                 f"primaries_hashed={self.manifest_primaries_hashed}",
                 f"sidecars_hashed={self.manifest_sidecars_hashed}",
+                f"uncategorized_hashed={self.manifest_uncategorized_hashed}",
                 f"bytes_hashed={format_bytes(self.manifest_bytes_hashed)}",
                 f"rows_written={self.manifest_rows_written}",
             ]

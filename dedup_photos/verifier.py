@@ -13,6 +13,7 @@ from dedup_photos.deduper import (
     hash_file,
     is_primary_image,
     normalize_input_roots,
+    sidecar_belongs_to_primary,
     validate_dupe_root,
 )
 from dedup_photos.progress import Progress
@@ -205,7 +206,7 @@ def independently_find_sidecars(primary_path: Path) -> list[Path]:
             continue
         if candidate.is_symlink() or not candidate.is_file():
             continue
-        if candidate.stem != primary_path.stem:
+        if not sidecar_belongs_to_primary(candidate, primary_path):
             continue
         if is_primary_image(candidate):
             continue

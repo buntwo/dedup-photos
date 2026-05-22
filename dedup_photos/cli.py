@@ -55,6 +55,8 @@ def build_manifest_parser() -> argparse.ArgumentParser:
         epilog=(
             "local_batch_root and --nas-root must be matching tree roots.\n"
             "For each local file, the relative path under local_batch_root is appended to --nas-root.\n\n"
+            "The manifest is a one-row-per-regular-file inventory. Rows are marked\n"
+            "primary, sidecar, or uncategorized; primary/sidecar rows share group_id.\n\n"
             "--nas-root must already exist and be mounted/readable. Its basename must match\n"
             "local_batch_root, and directories through two levels are checked as a quick\n"
             "guard against pointing at the wrong NAS tree.\n\n"

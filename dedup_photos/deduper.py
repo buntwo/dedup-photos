@@ -129,12 +129,18 @@ def find_sidecars(primary_path: Path) -> list[Path]:
             continue
         if candidate.is_symlink() or not candidate.is_file():
             continue
-        if candidate.stem != primary_path.stem:
+        if not sidecar_belongs_to_primary(candidate, primary_path):
             continue
         if is_primary_image(candidate):
             continue
         sidecars.append(candidate)
     return sidecars
+
+
+def sidecar_belongs_to_primary(candidate: Path, primary_path: Path) -> bool:
+    if candidate.stem == primary_path.stem:
+        return True
+    return candidate.name.lower().startswith(f"{primary_path.name}.".lower())
 
 
 def hash_file(path: Path) -> str:
