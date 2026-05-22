@@ -25,11 +25,11 @@ uv run dedup-photos INPUT_ROOT [INPUT_ROOT ...] --output DUPLICATE_OUTPUT_DIR --
 For slow NAS storage, copy batches to a faster local disk, hash them locally, and store the intended NAS paths in CSV manifests:
 
 ```bash
-uv run dedup-photos manifest /local/batch/google-photos \
+uv run dedup-photos-manifest manifest /local/batch/google-photos \
   --nas-root "/volume1/photo/google photos" \
   --manifest google_photos.csv
 
-uv run dedup-photos manifest /local/batch/backups \
+uv run dedup-photos-manifest manifest /local/batch/backups \
   --nas-root "/volume1/homes/btu/photos/backups" \
   --manifest backups.csv
 ```
@@ -37,7 +37,7 @@ uv run dedup-photos manifest /local/batch/backups \
 After all batches are processed, compute the duplicate move plan without rereading file contents:
 
 ```bash
-uv run dedup-photos plan-from-manifests google_photos.csv backups.csv \
+uv run dedup-photos-manifest plan google_photos.csv backups.csv \
   --output /volume1/photo/dupes \
   --log manifest_move_plan.csv
 ```
@@ -45,14 +45,14 @@ uv run dedup-photos plan-from-manifests google_photos.csv backups.csv \
 Execute the move plan. This is also a dry run by default:
 
 ```bash
-uv run dedup-photos execute-plan manifest_move_plan.csv \
+uv run dedup-photos-manifest execute-plan manifest_move_plan.csv \
   --log manifest_execute_dry_run.csv
 ```
 
 Move files only with the explicit flag:
 
 ```bash
-uv run dedup-photos execute-plan manifest_move_plan.csv \
+uv run dedup-photos-manifest execute-plan manifest_move_plan.csv \
   --move \
   --log manifest_execute.csv
 ```
@@ -60,15 +60,14 @@ uv run dedup-photos execute-plan manifest_move_plan.csv \
 Manifest mode uses file size plus `xxh128` for primary image identity and records sidecar paths, sizes, and hashes so keeper precedence can be computed offline. Optional byte-level verification rereads the NAS paths referenced by the manifests:
 
 ```bash
-uv run dedup-photos verify-manifests google_photos.csv backups.csv \
-  --byte-check \
+uv run dedup-photos-manifest verify-bytes google_photos.csv backups.csv \
   --log manifest_verify.csv
 ```
 
 After moving, verify that the expected files were moved and only expected files are present in the duplicate output tree. This checks paths and sizes, not file bytes:
 
 ```bash
-uv run dedup-photos verify-move google_photos.csv backups.csv \
+uv run dedup-photos-manifest verify-move google_photos.csv backups.csv \
   --output /volume1/photo/dupes \
   --log manifest_move_verify.csv
 ```

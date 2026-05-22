@@ -9,11 +9,8 @@ from dedup_photos.manifest import execute_plan, generate_manifest, plan_from_man
 from dedup_photos.verifier import run_verify
 
 
-COMMANDS = {"manifest", "plan-from-manifests", "verify-manifests", "execute-plan", "verify-move"}
-
-
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Move bit-exact duplicate photos into a parallel output tree.")
+    parser = argparse.ArgumentParser(description="Deduplicate live photo directories by hashing files in place.")
     parser.add_argument("inputs", nargs="+", type=Path, help="One or more input photo library roots.")
     parser.add_argument("--output", required=True, type=Path, help="Directory where duplicate files are moved.")
     parser.add_argument("--log", type=Path, default=None, help="CSV log path. Defaults to a timestamped file.")
@@ -22,16 +19,8 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def build_command_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
-        description="Deduplicate photos directly or through batch manifests.",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog=(
-            "Direct dedup mode is also supported:\n"
-            "  dedup-photos INPUT_ROOT [INPUT_ROOT ...] --output DUPLICATE_OUTPUT_DIR [--move]\n"
-            "  dedup-photos INPUT_ROOT [INPUT_ROOT ...] --output DUPLICATE_OUTPUT_DIR --verify"
-        ),
-    )
+def build_manifest_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description="Deduplicate NAS photos through batch manifests.")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     manifest = subparsers.add_parser("manifest", help="Hash a local batch and write a CSV manifest with NAS paths.")
@@ -39,15 +28,14 @@ def build_command_parser() -> argparse.ArgumentParser:
     manifest.add_argument("--nas-root", required=True, type=Path)
     manifest.add_argument("--manifest", required=True, type=Path)
 
-    plan = subparsers.add_parser("plan-from-manifests", help="Compute a duplicate move plan from CSV manifests.")
+    plan = subparsers.add_parser("plan", help="Compute a duplicate move plan from CSV manifests.")
     plan.add_argument("manifests", nargs="+", type=Path)
     plan.add_argument("--output", required=True, type=Path)
     plan.add_argument("--log", type=Path, default=None)
 
-    verify = subparsers.add_parser("verify-manifests", help="Byte-check duplicate groups referenced by manifests.")
+    verify = subparsers.add_parser("verify-bytes", help="Byte-check duplicate groups referenced by manifests.")
     verify.add_argument("manifests", nargs="+", type=Path)
     verify.add_argument("--log", type=Path, default=None)
-    verify.add_argument("--byte-check", action="store_true", help="Read NAS files and byte-check same-hash groups.")
 
     execute = subparsers.add_parser("execute-plan", help="Validate or execute a manifest move plan.")
     execute.add_argument("plan", type=Path)
@@ -63,9 +51,6 @@ def build_command_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
-    if argv and (argv[0] in COMMANDS or argv[0] in {"-h", "--help"}):
-        return command_main(argv)
-
     parser = build_parser()
     args = parser.parse_args(argv)
     log_path = args.log or default_log_path()
@@ -87,15 +72,16 @@ def main(argv: list[str] | None = None) -> int:
     return 0
 
 
-def command_main(argv: list[str]) -> int:
-    parser = build_command_parser()
+def manifest_main(argv: list[str] | None = None) -> int:
+    argv = list(sys.argv[1:] if argv is None else argv)
+    parser = build_manifest_parser()
     args = parser.parse_args(argv)
     try:
         if args.command == "manifest":
             manifest_path = generate_manifest(args.local_batch_root, args.nas_root, args.manifest)
             print(f"Wrote manifest to {manifest_path}")
             return 0
-        if args.command == "plan-from-manifests":
+        if args.command == "plan":
             result = plan_from_manifests(args.manifests, args.output, args.log)
             print(
                 f"Wrote manifest move plan to {result.log_path}; "
@@ -103,8 +89,8 @@ def command_main(argv: list[str]) -> int:
                 f"duplicate_files={result.duplicate_files} skipped_groups={result.skipped_groups}"
             )
             return 0
-        if args.command == "verify-manifests":
-            result = verify_manifests(args.manifests, args.log, args.byte_check)
+        if args.command == "verify-bytes":
+            result = verify_manifests(args.manifests, args.log, byte_check=True)
             print(
                 f"Completed manifest verify; checked_groups={result.checked_groups} "
                 f"failed_groups={result.failed_groups}; wrote CSV log to {result.log_path}"

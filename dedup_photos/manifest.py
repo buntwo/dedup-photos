@@ -415,7 +415,7 @@ def manifest_destination_for(output_root: Path, nas_root_label: str, relative_pa
 
 def verify_manifests(manifest_paths: list[Path], log_path: Path | None, byte_check: bool) -> ManifestVerifyResult:
     if not byte_check:
-        raise ValueError("verify-manifests currently requires --byte-check")
+        raise ValueError("verify_manifests requires byte_check=True")
     entries = load_manifests(manifest_paths)
     groups, _ = manifest_duplicate_groups(entries)
     actual_log_path = log_path or default_log_path()

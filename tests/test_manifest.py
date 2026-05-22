@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 
 from dedup_photos.constants import MANIFEST_VERSION
-from dedup_photos.cli import main
+from dedup_photos.cli import main, manifest_main
 from dedup_photos.manifest import MANIFEST_FIELDS
 from dedup_photos.manifest import execute_plan, generate_manifest, plan_from_manifests, verify_manifests, verify_move
 
@@ -185,7 +185,7 @@ def test_verify_manifests_byte_checks_same_hash_groups(tmp_path: Path) -> None:
 
 
 def test_verify_manifests_requires_byte_check_flag(tmp_path: Path) -> None:
-    with pytest.raises(ValueError, match="--byte-check"):
+    with pytest.raises(ValueError, match="byte_check=True"):
         verify_manifests([], tmp_path / "verify.csv", byte_check=False)
 
 
@@ -433,28 +433,37 @@ def test_manifest_cli_subcommands(tmp_path: Path) -> None:
     write(nas_root / "one" / "a.jpg", b"same")
     write(nas_root / "two" / "b.jpg", b"same")
 
-    assert main(["manifest", str(local_one), "--nas-root", str(nas_root / "one"), "--manifest", str(manifest_one)]) == 0
-    assert main(["manifest", str(local_two), "--nas-root", str(nas_root / "two"), "--manifest", str(manifest_two)]) == 0
-    assert main(["plan-from-manifests", str(manifest_one), str(manifest_two), "--output", str(tmp_path / "dupes"), "--log", str(plan_log)]) == 0
-    assert main(["verify-manifests", str(manifest_one), str(manifest_two), "--byte-check", "--log", str(verify_log)]) == 0
+    assert manifest_main(["manifest", str(local_one), "--nas-root", str(nas_root / "one"), "--manifest", str(manifest_one)]) == 0
+    assert manifest_main(["manifest", str(local_two), "--nas-root", str(nas_root / "two"), "--manifest", str(manifest_two)]) == 0
+    assert manifest_main(["plan", str(manifest_one), str(manifest_two), "--output", str(tmp_path / "dupes"), "--log", str(plan_log)]) == 0
+    assert manifest_main(["verify-bytes", str(manifest_one), str(manifest_two), "--log", str(verify_log)]) == 0
     assert manifest_one.exists()
     assert manifest_two.exists()
     assert [row for row in rows(plan_log) if row["event"] == "duplicate_primary_move"]
     assert rows(verify_log)[0]["disposition"] == "verify_matched"
 
 
-def test_top_level_help_lists_manifest_commands(capsys: pytest.CaptureFixture[str]) -> None:
+def test_direct_help_does_not_list_manifest_commands(capsys: pytest.CaptureFixture[str]) -> None:
     with pytest.raises(SystemExit) as exit_info:
         main(["--help"])
 
     assert exit_info.value.code == 0
     help_text = capsys.readouterr().out
+    assert "input photo library roots" in help_text
+    assert "manifest" not in help_text
+
+
+def test_manifest_help_lists_manifest_commands(capsys: pytest.CaptureFixture[str]) -> None:
+    with pytest.raises(SystemExit) as exit_info:
+        manifest_main(["--help"])
+
+    assert exit_info.value.code == 0
+    help_text = capsys.readouterr().out
     assert "manifest" in help_text
-    assert "plan-from-manifests" in help_text
-    assert "verify-manifests" in help_text
+    assert "plan" in help_text
+    assert "verify-bytes" in help_text
     assert "execute-plan" in help_text
     assert "verify-move" in help_text
-    assert "Direct dedup mode is also supported" in help_text
 
 
 def test_verify_move_passes_after_manifest_move(tmp_path: Path) -> None:
@@ -580,7 +589,7 @@ def test_verify_move_cli_returns_nonzero_on_failure(tmp_path: Path) -> None:
     manifests, _plan_path, _nas_one, _nas_two, output_root = make_manifest_move_case(tmp_path)
     log_path = tmp_path / "verify_move.csv"
 
-    assert main(["verify-move", *[str(path) for path in manifests], "--output", str(output_root), "--log", str(log_path)]) == 1
+    assert manifest_main(["verify-move", *[str(path) for path in manifests], "--output", str(output_root), "--log", str(log_path)]) == 1
     assert [row for row in rows(log_path) if row["disposition"] == "verify_move_failed"]
 
 
@@ -797,9 +806,9 @@ def test_execute_plan_cli_dry_run_and_move(tmp_path: Path) -> None:
     dry_log = tmp_path / "dry.csv"
     move_log = tmp_path / "move.csv"
 
-    assert main(["execute-plan", str(plan_path), "--log", str(dry_log)]) == 0
+    assert manifest_main(["execute-plan", str(plan_path), "--log", str(dry_log)]) == 0
     assert (nas_two / "photo.jpg").exists()
-    assert main(["execute-plan", str(plan_path), "--log", str(move_log), "--move"]) == 0
+    assert manifest_main(["execute-plan", str(plan_path), "--log", str(move_log), "--move"]) == 0
 
     assert not (nas_two / "photo.jpg").exists()
     assert (output_root / "nas-two" / "photo.jpg").exists()
