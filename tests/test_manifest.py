@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 
 from dedup_photos.constants import MANIFEST_VERSION
-from dedup_photos.cli import main, manifest_main
+from dedup_photos.cli import default_manifest_output_path, main, manifest_main
 from dedup_photos.manifest import MANIFEST_FIELDS
 from dedup_photos.manifest import execute_plan, generate_manifest, plan_from_manifests, verify_manifests, verify_move
 
@@ -443,6 +443,24 @@ def test_manifest_cli_subcommands(tmp_path: Path) -> None:
     assert rows(verify_log)[0]["disposition"] == "verify_matched"
 
 
+def test_manifest_cli_default_manifest_path(tmp_path: Path) -> None:
+    local_root = tmp_path / "google_photos"
+    nas_root = tmp_path / "nas" / "google_photos"
+    default_manifest = tmp_path / "google_photos.manifest.csv"
+    write(local_root / "2021" / "img.jpg", b"image")
+
+    assert manifest_main(["manifest", str(local_root), "--nas-root", str(nas_root)]) == 0
+
+    assert default_manifest.exists()
+    assert rows(default_manifest)[0]["nas_path"] == str(nas_root / "2021" / "img.jpg")
+
+
+def test_default_manifest_output_path_appends_manifest_suffix() -> None:
+    assert default_manifest_output_path(Path("/local/project/google_photos")) == Path(
+        "/local/project/google_photos.manifest.csv"
+    )
+
+
 def test_direct_help_does_not_list_manifest_commands(capsys: pytest.CaptureFixture[str]) -> None:
     with pytest.raises(SystemExit) as exit_info:
         main(["--help"])
@@ -450,7 +468,8 @@ def test_direct_help_does_not_list_manifest_commands(capsys: pytest.CaptureFixtu
     assert exit_info.value.code == 0
     help_text = capsys.readouterr().out
     assert "input photo library roots" in help_text
-    assert "manifest" not in help_text
+    assert "dedup-photos-manifest --help" in help_text
+    assert "verify-move" not in help_text
 
 
 def test_manifest_help_lists_manifest_commands(capsys: pytest.CaptureFixture[str]) -> None:
@@ -464,6 +483,7 @@ def test_manifest_help_lists_manifest_commands(capsys: pytest.CaptureFixture[str
     assert "verify-bytes" in help_text
     assert "execute-plan" in help_text
     assert "verify-move" in help_text
+    assert "Typical workflow" in help_text
 
 
 def test_verify_move_passes_after_manifest_move(tmp_path: Path) -> None:

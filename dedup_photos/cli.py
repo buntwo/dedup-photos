@@ -10,7 +10,17 @@ from dedup_photos.verifier import run_verify
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Deduplicate live photo directories by hashing files in place.")
+    parser = argparse.ArgumentParser(
+        description="Deduplicate live photo directories by hashing files in place.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=(
+            "Examples:\n"
+            "  dedup-photos /photos/google /photos/phone --output /photos/dupes\n"
+            "  dedup-photos /photos/google /photos/phone --output /photos/dupes --move\n"
+            "  dedup-photos /photos/google /photos/phone --output /photos/dupes --verify\n\n"
+            "For the local-batch/NAS manifest workflow, use dedup-photos-manifest --help."
+        ),
+    )
     parser.add_argument("inputs", nargs="+", type=Path, help="One or more input photo library roots.")
     parser.add_argument("--output", required=True, type=Path, help="Directory where duplicate files are moved.")
     parser.add_argument("--log", type=Path, default=None, help="CSV log path. Defaults to a timestamped file.")
@@ -20,32 +30,122 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def build_manifest_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Deduplicate NAS photos through batch manifests.")
+    parser = argparse.ArgumentParser(
+        description="Deduplicate NAS photos through batch manifests.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=(
+            "Typical workflow:\n"
+            "  dedup-photos-manifest manifest /local/project/google_photos \\\n"
+            "    --nas-root /my/nas/google_photos\n"
+            "  dedup-photos-manifest plan /local/project/google_photos.manifest.csv phone.manifest.csv \\\n"
+            "    --output /my/nas/dupes --log move_plan.csv\n"
+            "  dedup-photos-manifest verify-bytes /local/project/google_photos.manifest.csv phone.manifest.csv \\\n"
+            "    --log byte_verify.csv\n"
+            "  dedup-photos-manifest execute-plan move_plan.csv --move --log execute.csv\n"
+            "  dedup-photos-manifest verify-move /local/project/google_photos.manifest.csv phone.manifest.csv \\\n"
+            "    --output /my/nas/dupes --log move_verify.csv"
+        ),
+    )
     subparsers = parser.add_subparsers(dest="command", required=True)
 
-    manifest = subparsers.add_parser("manifest", help="Hash a local batch and write a CSV manifest with NAS paths.")
-    manifest.add_argument("local_batch_root", type=Path)
-    manifest.add_argument("--nas-root", required=True, type=Path)
-    manifest.add_argument("--manifest", required=True, type=Path)
+    manifest = subparsers.add_parser(
+        "manifest",
+        help="Hash a local batch and write a CSV manifest with NAS paths.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=(
+            "local_batch_root and --nas-root must be matching tree roots.\n"
+            "For each local file, the relative path under local_batch_root is appended to --nas-root.\n\n"
+            "Example:\n"
+            "  copied NAS tree: /my/nas/google_photos\n"
+            "  local copy:      /local/project/google_photos\n"
+            "  command:         dedup-photos-manifest manifest /local/project/google_photos \\\n"
+            "                     --nas-root /my/nas/google_photos\n\n"
+            "Default manifest path: /local/project/google_photos.manifest.csv\n"
+            "A local file /local/project/google_photos/2021/img.jpg is recorded as\n"
+            "/my/nas/google_photos/2021/img.jpg."
+        ),
+    )
+    manifest.add_argument(
+        "local_batch_root",
+        type=Path,
+        help="Root of the local copied batch to hash, e.g. /local/project/google_photos.",
+    )
+    manifest.add_argument(
+        "--nas-root",
+        required=True,
+        type=Path,
+        help="Original NAS root corresponding to local_batch_root, e.g. /my/nas/google_photos.",
+    )
+    manifest.add_argument(
+        "--manifest",
+        type=Path,
+        help="CSV manifest path to write. Defaults to LOCAL_BATCH_ROOT.manifest.csv.",
+    )
 
-    plan = subparsers.add_parser("plan", help="Compute a duplicate move plan from CSV manifests.")
-    plan.add_argument("manifests", nargs="+", type=Path)
-    plan.add_argument("--output", required=True, type=Path)
-    plan.add_argument("--log", type=Path, default=None)
+    plan = subparsers.add_parser(
+        "plan",
+        help="Compute a duplicate move plan from CSV manifests.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=(
+            "--output is the duplicate holding directory on the NAS. Planned destinations are\n"
+            "--output / nas_root_label / relative_path, where nas_root_label is the basename\n"
+            "of the --nas-root used when creating each manifest.\n\n"
+            "Example:\n"
+            "  dedup-photos-manifest plan google_photos.manifest.csv phone.manifest.csv \\\n"
+            "    --output /my/nas/dupes \\\n"
+            "    --log move_plan.csv"
+        ),
+    )
+    plan.add_argument("manifests", nargs="+", type=Path, help="Manifest CSVs created by the manifest subcommand.")
+    plan.add_argument("--output", required=True, type=Path, help="NAS duplicate holding directory for planned moves.")
+    plan.add_argument("--log", type=Path, default=None, help="Move-plan CSV to write.")
 
-    verify = subparsers.add_parser("verify-bytes", help="Byte-check duplicate groups referenced by manifests.")
-    verify.add_argument("manifests", nargs="+", type=Path)
-    verify.add_argument("--log", type=Path, default=None)
+    verify = subparsers.add_parser(
+        "verify-bytes",
+        help="Byte-check duplicate groups referenced by manifests.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=(
+            "This rereads only NAS files that are in same-size/same-hash manifest groups.\n"
+            "Run it before execute-plan --move.\n\n"
+            "Example:\n"
+            "  dedup-photos-manifest verify-bytes google_photos.manifest.csv phone.manifest.csv --log byte_verify.csv"
+        ),
+    )
+    verify.add_argument("manifests", nargs="+", type=Path, help="Manifest CSVs to verify against NAS files.")
+    verify.add_argument("--log", type=Path, default=None, help="CSV verification log to write.")
 
-    execute = subparsers.add_parser("execute-plan", help="Validate or execute a manifest move plan.")
-    execute.add_argument("plan", type=Path)
-    execute.add_argument("--log", type=Path, default=None)
+    execute = subparsers.add_parser(
+        "execute-plan",
+        help="Validate or execute a manifest move plan.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=(
+            "Default is a dry run: the plan is validated and logged, but no files move.\n"
+            "Add --move to move duplicate primaries and their sidecars.\n\n"
+            "Examples:\n"
+            "  dedup-photos-manifest execute-plan move_plan.csv --log execute_dry_run.csv\n"
+            "  dedup-photos-manifest execute-plan move_plan.csv --move --log execute.csv"
+        ),
+    )
+    execute.add_argument("plan", type=Path, help="Move-plan CSV created by the plan subcommand.")
+    execute.add_argument("--log", type=Path, default=None, help="CSV execution log to write.")
     execute.add_argument("--move", action="store_true", help="Actually move files. Default is dry run.")
 
-    verify_move_parser = subparsers.add_parser("verify-move", help="Verify manifest-planned moves were executed.")
-    verify_move_parser.add_argument("manifests", nargs="+", type=Path)
-    verify_move_parser.add_argument("--output", required=True, type=Path)
-    verify_move_parser.add_argument("--log", type=Path, default=None)
+    verify_move_parser = subparsers.add_parser(
+        "verify-move",
+        help="Verify manifest-planned moves were executed.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=(
+            "Use the same manifests and --output root that were used for plan.\n"
+            "This checks paths and sizes only; byte identity should be checked first with verify-bytes.\n\n"
+            "Example:\n"
+            "  dedup-photos-manifest verify-move google_photos.manifest.csv phone.manifest.csv \\\n"
+            "    --output /my/nas/dupes \\\n"
+            "    --log move_verify.csv"
+        ),
+    )
+    verify_move_parser.add_argument("manifests", nargs="+", type=Path, help="Manifest CSVs used to create the move plan.")
+    verify_move_parser.add_argument("--output", required=True, type=Path, help="Duplicate holding directory used by plan.")
+    verify_move_parser.add_argument("--log", type=Path, default=None, help="CSV move-verification log to write.")
     return parser
 
 
@@ -78,7 +178,11 @@ def manifest_main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     try:
         if args.command == "manifest":
-            manifest_path = generate_manifest(args.local_batch_root, args.nas_root, args.manifest)
+            manifest_path = generate_manifest(
+                args.local_batch_root,
+                args.nas_root,
+                args.manifest or default_manifest_output_path(args.local_batch_root),
+            )
             print(f"Wrote manifest to {manifest_path}")
             return 0
         if args.command == "plan":
@@ -117,6 +221,10 @@ def manifest_main(argv: list[str] | None = None) -> int:
         parser.error(str(error))
     parser.error(f"unknown command: {args.command}")
     return 2
+
+
+def default_manifest_output_path(local_batch_root: Path) -> Path:
+    return Path(f"{local_batch_root}.manifest.csv")
 
 
 if __name__ == "__main__":
