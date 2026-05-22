@@ -158,7 +158,7 @@ def test_different_sidecars_skip_whole_group(tmp_path: Path) -> None:
     assert not output_root.exists()
 
 
-def test_dedup_sidecar_comparison_byte_checks_after_hash_match(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_dedup_sidecar_comparison_uses_hash_only(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     input_root = tmp_path / "IN"
     output_root = tmp_path / "OUT"
     first = write(input_root / "a" / "photo.heic", b"same")
@@ -177,9 +177,26 @@ def test_dedup_sidecar_comparison_byte_checks_after_hash_match(tmp_path: Path, m
     log_rows = run(tmp_path, [input_root], output_root, move=True)
 
     assert first.exists()
-    assert second.exists()
-    assert events(log_rows, "duplicate_group_skipped")[0]["reason"] == "unresolved_sidecar_conflict"
-    assert not output_root.exists()
+    assert not second.exists()
+    assert not events(log_rows, "duplicate_group_skipped")
+    assert events(log_rows, "duplicate_primary_move")[0]["status"] == "moved"
+    assert (output_root / "IN" / "b" / "photo.heic").exists()
+
+
+def test_dedup_sidecars_with_different_suffixes_match_by_hash(tmp_path: Path) -> None:
+    input_root = tmp_path / "IN"
+    output_root = tmp_path / "OUT"
+    first = write(input_root / "a" / "photo.heic", b"same")
+    second = write(input_root / "b" / "photo.heic", b"same")
+    write(input_root / "a" / "photo.mov", b"video")
+    write(input_root / "b" / "photo.mp4", b"video")
+
+    log_rows = run(tmp_path, [input_root], output_root, move=True)
+
+    assert first.exists()
+    assert not second.exists()
+    assert not events(log_rows, "duplicate_group_skipped")
+    assert (output_root / "IN" / "b" / "photo.mp4").read_bytes() == b"video"
 
 
 def test_takeout_non_date_album_beats_photos_from_year(tmp_path: Path) -> None:
@@ -396,13 +413,13 @@ def test_verify_fails_when_sidecars_conflict(tmp_path: Path) -> None:
     assert rows(verify_log)[0]["reason"] == "sidecar_conflict_should_not_have_moved"
 
 
-def test_verify_sidecar_comparison_byte_checks_after_hash_match(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_verify_sidecar_comparison_uses_hash_only(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     input_root = tmp_path / "IN"
     output_root = tmp_path / "OUT"
     write(input_root / "keep.jpg", b"image")
     write(input_root / "keep.json", b"left")
-    write(output_root / "IN" / "dup.jpg", b"image")
-    write(output_root / "IN" / "dup.json", b"LEFT")
+    write(output_root / "IN" / "zdup.jpg", b"image")
+    write(output_root / "IN" / "zdup.json", b"LEFT")
     original_hash_file = verifier.hash_file
 
     def fake_hash_file(path: Path) -> str:
@@ -416,5 +433,21 @@ def test_verify_sidecar_comparison_byte_checks_after_hash_match(tmp_path: Path, 
     result = run_verify([input_root], output_root, verify_log)
 
     assert result.checked == 1
-    assert result.failed == 1
-    assert rows(verify_log)[0]["reason"] == "sidecar_conflict_should_not_have_moved"
+    assert result.failed == 0
+    assert rows(verify_log)[0]["reason"] == "equal_input_primary_and_precedence_verified"
+
+
+def test_verify_sidecars_with_different_suffixes_match_by_hash(tmp_path: Path) -> None:
+    input_root = tmp_path / "IN"
+    output_root = tmp_path / "OUT"
+    write(input_root / "keep.jpg", b"image")
+    write(input_root / "keep.mov", b"video")
+    write(output_root / "IN" / "zdup.jpg", b"image")
+    write(output_root / "IN" / "zdup.mp4", b"video")
+
+    verify_log = tmp_path / "verify.csv"
+    result = run_verify([input_root], output_root, verify_log)
+
+    assert result.checked == 1
+    assert result.failed == 0
+    assert rows(verify_log)[0]["reason"] == "equal_input_primary_and_precedence_verified"

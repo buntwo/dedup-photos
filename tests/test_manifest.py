@@ -484,9 +484,9 @@ def test_equivalent_sidecars_on_both_sides_allow_planning(tmp_path: Path) -> Non
     manifest_two = tmp_path / "two.csv"
     log_path = tmp_path / "plan.csv"
     write(local_one / "photo.jpg", b"same")
-    write(local_one / "photo.json", b"metadata")
+    write(local_one / "photo.mov", b"video")
     write(local_two / "photo.jpg", b"same")
-    write(local_two / "photo.json", b"metadata")
+    write(local_two / "photo.mp4", b"video")
     nas_one = prepare_nas_root(local_one, tmp_path / "nas")
     nas_two = prepare_nas_root(local_two, tmp_path / "nas")
     generate_manifest(local_one, nas_one, manifest_one)
@@ -496,6 +496,8 @@ def test_equivalent_sidecars_on_both_sides_allow_planning(tmp_path: Path) -> Non
 
     assert result.skipped_groups == 0
     assert len([row for row in rows(log_path) if row["event"] == "duplicate_primary_move"]) == 1
+    sidecar_move = [row for row in rows(log_path) if row["event"] == "sidecar_move"][0]
+    assert sidecar_move["source_path"] == str(nas_two / "photo.mp4")
 
 
 def test_load_manifest_rejects_missing_fields(tmp_path: Path) -> None:

@@ -246,18 +246,7 @@ def sidecar_sets_equivalent(files: list[PrimaryFile]) -> bool:
 
 
 def sidecars_equivalent(left: tuple[Path, ...], right: tuple[Path, ...]) -> bool:
-    left_sorted = sorted(left, key=lambda path: (path.suffix.lower(), path.name.lower()))
-    right_sorted = sorted(right, key=lambda path: (path.suffix.lower(), path.name.lower()))
-    if [path.suffix.lower() for path in left_sorted] != [path.suffix.lower() for path in right_sorted]:
-        return False
-    return all(
-        files_have_same_signature(left_path, right_path) and files_equal(left_path, right_path)
-        for left_path, right_path in zip(left_sorted, right_sorted, strict=True)
-    )
-
-
-def files_have_same_signature(left: Path, right: Path) -> bool:
-    return left.stat().st_size == right.stat().st_size and hash_file(left) == hash_file(right)
+    return sorted(hash_file(path) for path in left) == sorted(hash_file(path) for path in right)
 
 
 def keeper_key(primary: PrimaryFile) -> tuple[int, int, int, int, str, str]:

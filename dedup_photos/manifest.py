@@ -570,11 +570,8 @@ def manifest_sidecar_sets_equivalent(entries: list[ManifestEntry]) -> bool:
     return all(manifest_sidecar_signature(entry) == first for entry in entries[1:])
 
 
-def manifest_sidecar_signature(entry: ManifestEntry) -> tuple[tuple[str, int, str], ...]:
-    values = []
-    for path, size_bytes, digest in zip(entry.sidecar_paths, entry.sidecar_sizes, entry.sidecar_xxh128s, strict=True):
-        values.append((path.suffix.lower(), size_bytes, digest))
-    return tuple(sorted(values))
+def manifest_sidecar_signature(entry: ManifestEntry) -> tuple[str, ...]:
+    return tuple(sorted(entry.sidecar_xxh128s))
 
 
 def manifest_keeper_key(entry: ManifestEntry) -> tuple[int, int, int, int, str, str]:
@@ -958,11 +955,8 @@ def verify_move_sidecar_conflict(group: list[ManifestEntry]) -> bool:
     return any(verify_move_sidecar_signature(entry) != first for entry in with_sidecars[1:])
 
 
-def verify_move_sidecar_signature(entry: ManifestEntry) -> tuple[tuple[str, int, str], ...]:
-    signature = []
-    for path, size_bytes, digest in zip(entry.sidecar_paths, entry.sidecar_sizes, entry.sidecar_xxh128s, strict=True):
-        signature.append((path.suffix.lower(), size_bytes, digest))
-    return tuple(sorted(signature))
+def verify_move_sidecar_signature(entry: ManifestEntry) -> tuple[str, ...]:
+    return tuple(sorted(entry.sidecar_xxh128s))
 
 
 def verify_move_choose_keeper(group: list[ManifestEntry]) -> ManifestEntry:

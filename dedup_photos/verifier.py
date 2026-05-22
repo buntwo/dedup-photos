@@ -246,18 +246,7 @@ def independently_detect_sidecar_conflict(group: list[VerifyPrimary]) -> bool:
 
 
 def independently_sidecars_equal(left: tuple[Path, ...], right: tuple[Path, ...]) -> bool:
-    left_sorted = sorted(left, key=lambda path: (path.suffix.lower(), path.name.lower()))
-    right_sorted = sorted(right, key=lambda path: (path.suffix.lower(), path.name.lower()))
-    if [path.suffix.lower() for path in left_sorted] != [path.suffix.lower() for path in right_sorted]:
-        return False
-    for left_path, right_path in zip(left_sorted, right_sorted, strict=True):
-        if left_path.stat().st_size != right_path.stat().st_size:
-            return False
-        if hash_file(left_path) != hash_file(right_path):
-            return False
-        if not files_equal(left_path, right_path):
-            return False
-    return True
+    return sorted(hash_file(path) for path in left) == sorted(hash_file(path) for path in right)
 
 
 def independently_choose_keeper(group: list[VerifyPrimary]) -> VerifyPrimary:
