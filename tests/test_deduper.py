@@ -50,6 +50,24 @@ def test_dry_run_logs_moves_without_touching_files(tmp_path: Path) -> None:
     assert not output_root.exists()
 
 
+def test_dedup_progress_line_reports_requested_fields(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    input_root = tmp_path / "IN_1"
+    output_root = tmp_path / "OUT"
+    write(input_root / "a" / "one.JPG", b"same")
+    write(input_root / "b" / "two.jpg", b"same")
+
+    run_dedup([input_root], output_root, tmp_path / "log.csv", move=False, show_progress=True)
+
+    progress = capsys.readouterr().err
+    assert "dedup dry_run:" in progress
+    assert "files=" in progress
+    assert "images=2/2" in progress
+    assert "done=100.0%" in progress
+    assert "moved=1" in progress
+    assert "errors=0" in progress
+    assert "kept=" in progress
+
+
 def test_move_mode_moves_duplicate_and_sidecars_under_input_label(tmp_path: Path) -> None:
     input_one = tmp_path / "IN_1"
     input_two = tmp_path / "IN_2"
@@ -248,6 +266,24 @@ def test_verify_succeeds_for_moved_duplicate_with_respected_sidecar_precedence(t
     assert result.failed == 0
     verify_rows = rows(verify_log)
     assert verify_rows[0]["disposition"] == "verify_matched"
+
+
+def test_verify_progress_line_reports_requested_fields(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    input_root = tmp_path / "IN"
+    output_root = tmp_path / "OUT"
+    write(input_root / "a.jpg", b"image")
+    write(output_root / "IN" / "z.jpg", b"image")
+
+    run_verify([input_root], output_root, tmp_path / "verify.csv", show_progress=True)
+
+    progress = capsys.readouterr().err
+    assert "verify:" in progress
+    assert "files=" in progress
+    assert "images=1/1" in progress
+    assert "done=100.0%" in progress
+    assert "moved=0" in progress
+    assert "errors=0" in progress
+    assert "kept=" in progress
 
 
 def test_verify_fails_when_output_file_should_have_won_by_sidecar_precedence(tmp_path: Path) -> None:

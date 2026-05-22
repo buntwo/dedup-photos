@@ -24,6 +24,8 @@ Every run writes a CSV log. Pass `--log path/to/log.csv` to choose the path; oth
 
 The CSV has a `disposition` column for one-column filtering, including values such as `kept_unique_primary`, `kept_duplicate_keeper`, `planned_duplicate_primary`, `moved_duplicate_primary`, `kept_error`, `verify_matched`, and `verify_failed`.
 
+While running from the CLI, progress is printed on stderr with processed files, processed image count, percent done, moved/planned file count, errors, and the current kept-set size.
+
 Moved files keep a parallel structure under the output directory, including the input root name:
 
 ```text

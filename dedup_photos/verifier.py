@@ -15,6 +15,7 @@ from dedup_photos.deduper import (
     normalize_input_roots,
     validate_dupe_root,
 )
+from dedup_photos.progress import Progress
 
 
 VERIFY_DATE_DIRECTORY_TOKEN_RE = re.compile(r"(?<!\d)(?:\d{4}-\d{2}-\d{2}|\d{8}|\d{4})(?!\d)")
@@ -40,7 +41,12 @@ class VerificationResult:
     log_path: Path
 
 
-def run_verify(input_paths: list[Path], dupe_path: Path, log_path: Path | None) -> VerificationResult:
+def run_verify(
+    input_paths: list[Path],
+    dupe_path: Path,
+    log_path: Path | None,
+    show_progress: bool = False,
+) -> VerificationResult:
     input_roots = normalize_input_roots(input_paths)
     dupe_root = validate_dupe_root(dupe_path, input_roots)
     actual_log_path = log_path or default_log_path()
@@ -48,61 +54,76 @@ def run_verify(input_paths: list[Path], dupe_path: Path, log_path: Path | None) 
     input_primaries = scan_verify_inputs(input_roots)
     dupe_primaries = scan_verify_dupes(dupe_root)
     index = build_verify_index([*input_primaries, *dupe_primaries])
+    progress = Progress(mode="verify", total_images=len(dupe_primaries), enabled=show_progress)
 
     matched = 0
     failed = 0
-    actual_log_path.parent.mkdir(parents=True, exist_ok=True)
-    with actual_log_path.open("w", newline="", encoding="utf-8") as file:
-        logger = CsvLogger(file, mode="verify")
-        for dupe in dupe_primaries:
-            equal_group = equal_verify_group(dupe, index)
-            input_matches = [candidate for candidate in equal_group if candidate.source == "input"]
-            if not input_matches:
-                failed += 1
-                log_verify_failure(
-                    logger,
-                    dupe,
-                    reason="no_equal_input_primary",
-                    message="output primary image has no byte-equal primary image in the input roots",
-                )
-                continue
+    counted_keeper_paths: set[Path] = set()
+    try:
+        actual_log_path.parent.mkdir(parents=True, exist_ok=True)
+        with actual_log_path.open("w", newline="", encoding="utf-8") as file:
+            logger = CsvLogger(file, mode="verify")
+            for dupe in dupe_primaries:
+                equal_group = equal_verify_group(dupe, index)
+                input_matches = [candidate for candidate in equal_group if candidate.source == "input"]
+                if not input_matches:
+                    failed += 1
+                    progress.error()
+                    progress.image_processed()
+                    log_verify_failure(
+                        logger,
+                        dupe,
+                        reason="no_equal_input_primary",
+                        message="output primary image has no byte-equal primary image in the input roots",
+                    )
+                    continue
 
-            conflict = independently_detect_sidecar_conflict(equal_group)
-            if conflict:
-                failed += 1
-                log_verify_failure(
-                    logger,
-                    dupe,
-                    reason="sidecar_conflict_should_not_have_moved",
-                    message="equal group has conflicting sidecars, so dedup move should have skipped it",
-                )
-                continue
+                conflict = independently_detect_sidecar_conflict(equal_group)
+                if conflict:
+                    failed += 1
+                    progress.error()
+                    progress.image_processed()
+                    log_verify_failure(
+                        logger,
+                        dupe,
+                        reason="sidecar_conflict_should_not_have_moved",
+                        message="equal group has conflicting sidecars, so dedup move should have skipped it",
+                    )
+                    continue
 
-            expected_keeper = independently_choose_keeper(equal_group)
-            if expected_keeper.source != "input":
-                failed += 1
-                log_verify_failure(
-                    logger,
-                    dupe,
-                    reason="moved_file_should_have_been_keeper",
+                expected_keeper = independently_choose_keeper(equal_group)
+                if expected_keeper.source != "input":
+                    failed += 1
+                    progress.error()
+                    progress.image_processed()
+                    log_verify_failure(
+                        logger,
+                        dupe,
+                        reason="moved_file_should_have_been_keeper",
+                        keeper_path=expected_keeper.path,
+                        message="independent precedence rules selected an output file as the keeper",
+                    )
+                    continue
+
+                matched += 1
+                if expected_keeper.path not in counted_keeper_paths:
+                    counted_keeper_paths.add(expected_keeper.path)
+                    progress.kept(expected_keeper.size_bytes)
+                progress.image_processed()
+                logger.row(
+                    disposition="verify_matched",
+                    event="verify_output_primary",
+                    status="kept",
+                    file_role="primary",
+                    input_root=dupe.input_label,
+                    source_path=dupe.path,
                     keeper_path=expected_keeper.path,
-                    message="independent precedence rules selected an output file as the keeper",
+                    size_bytes=dupe.size_bytes,
+                    digest=dupe.digest,
+                    reason="equal_input_primary_and_precedence_verified",
                 )
-                continue
-
-            matched += 1
-            logger.row(
-                disposition="verify_matched",
-                event="verify_output_primary",
-                status="kept",
-                file_role="primary",
-                input_root=dupe.input_label,
-                source_path=dupe.path,
-                keeper_path=expected_keeper.path,
-                size_bytes=dupe.size_bytes,
-                digest=dupe.digest,
-                reason="equal_input_primary_and_precedence_verified",
-            )
+    finally:
+        progress.finish()
 
     return VerificationResult(
         checked=len(dupe_primaries),

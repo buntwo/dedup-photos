@@ -12,6 +12,7 @@ from typing import Iterable, TextIO
 import xxhash
 
 from dedup_photos.constants import HASH_CHUNK_SIZE, PRIMARY_IMAGE_EXTENSIONS
+from dedup_photos.progress import Progress
 
 
 DATE_DIRECTORY_TOKEN_RE = re.compile(r"(?<!\d)(?:\d{4}-\d{2}-\d{2}|\d{8}|\d{4})(?!\d)")
@@ -309,46 +310,64 @@ class CsvLogger:
         )
 
 
-def run_dedup(input_paths: list[Path], output_path: Path, log_path: Path | None, move: bool) -> Path:
+def run_dedup(
+    input_paths: list[Path],
+    output_path: Path,
+    log_path: Path | None,
+    move: bool,
+    show_progress: bool = False,
+) -> Path:
     input_roots = normalize_input_roots(input_paths)
     output_root = validate_output_root(output_path, input_roots)
     actual_log_path = log_path or default_log_path()
     mode = "move" if move else "dry_run"
 
     primaries = scan_primary_files(input_roots)
+    progress = Progress(mode=f"dedup {mode}", total_images=len(primaries), enabled=show_progress)
     groups, uniques, split_groups = build_duplicate_groups(primaries)
 
-    actual_log_path.parent.mkdir(parents=True, exist_ok=True)
-    with actual_log_path.open("w", newline="", encoding="utf-8") as file:
-        logger = CsvLogger(file, mode=mode)
-        for unique in uniques:
-            logger.row(
-                disposition="kept_unique_primary",
-                event="unique_primary",
-                status="unique",
-                file_role="primary",
-                input_root=unique.input_root.label,
-                source_path=unique.path,
-                size_bytes=unique.size_bytes,
-                message="no equal primary image found",
-            )
-        for digest, split_files in split_groups:
-            logger.row(
-                disposition="skipped_hash_split",
-                event="hash_collision_or_hash_group_split",
-                status="skipped",
-                digest=digest,
-                size_bytes=split_files[0].size_bytes if split_files else "",
-                reason="same size and xxh64 digest but byte comparison split the group",
-                message="unequal files were not deduped together",
-            )
-        for group in groups:
-            process_duplicate_group(group, output_root, move, logger)
+    try:
+        actual_log_path.parent.mkdir(parents=True, exist_ok=True)
+        with actual_log_path.open("w", newline="", encoding="utf-8") as file:
+            logger = CsvLogger(file, mode=mode)
+            for unique in uniques:
+                logger.row(
+                    disposition="kept_unique_primary",
+                    event="unique_primary",
+                    status="unique",
+                    file_role="primary",
+                    input_root=unique.input_root.label,
+                    source_path=unique.path,
+                    size_bytes=unique.size_bytes,
+                    message="no equal primary image found",
+                )
+                progress.kept(unique.size_bytes)
+                progress.image_processed()
+            for digest, split_files in split_groups:
+                logger.row(
+                    disposition="skipped_hash_split",
+                    event="hash_collision_or_hash_group_split",
+                    status="skipped",
+                    digest=digest,
+                    size_bytes=split_files[0].size_bytes if split_files else "",
+                    reason="same size and xxh64 digest but byte comparison split the group",
+                    message="unequal files were not deduped together",
+                )
+            for group in groups:
+                process_duplicate_group(group, output_root, move, logger, progress)
+    finally:
+        progress.finish()
 
     return actual_log_path
 
 
-def process_duplicate_group(group: DuplicateGroup, output_root: Path, move: bool, logger: CsvLogger) -> None:
+def process_duplicate_group(
+    group: DuplicateGroup,
+    output_root: Path,
+    move: bool,
+    logger: CsvLogger,
+    progress: Progress,
+) -> None:
     keeper, reason = choose_keeper(group)
     if keeper is None:
         logger.row(
@@ -362,6 +381,8 @@ def process_duplicate_group(group: DuplicateGroup, output_root: Path, move: bool
             message="duplicate group has conflicting sidecars",
         )
         for primary in group.files:
+            progress.kept(primary.size_bytes)
+            progress.image_processed()
             logger.row(
                 disposition="kept_sidecar_conflict",
                 event="duplicate_primary_kept_due_to_sidecar_conflict",
@@ -376,6 +397,7 @@ def process_duplicate_group(group: DuplicateGroup, output_root: Path, move: bool
                 message="primary left in place because duplicate group has conflicting sidecars",
             )
             for sidecar in primary.sidecars:
+                progress.file_processed()
                 logger.row(
                     disposition="kept_sidecar_conflict",
                     event="sidecar_kept_due_to_sidecar_conflict",
@@ -403,11 +425,13 @@ def process_duplicate_group(group: DuplicateGroup, output_root: Path, move: bool
         digest=group.digest,
         reason=reason,
     )
+    progress.kept(keeper.size_bytes)
+    progress.image_processed()
 
     for duplicate in group.files:
         if duplicate == keeper:
             continue
-        process_duplicate_file(duplicate, keeper, group, output_root, move, logger)
+        process_duplicate_file(duplicate, keeper, group, output_root, move, logger, progress)
 
 
 def process_duplicate_file(
@@ -417,12 +441,19 @@ def process_duplicate_file(
     output_root: Path,
     move: bool,
     logger: CsvLogger,
+    progress: Progress,
 ) -> None:
     bundle = [(duplicate.path, "primary")] + [(sidecar, "sidecar") for sidecar in duplicate.sidecars]
     destinations = [(source, destination_for(output_root, duplicate.input_root, source), role) for source, role in bundle]
     collision = next((destination for _, destination, _ in destinations if destination.exists()), None)
     if collision is not None:
         for source, destination, role in destinations:
+            progress.error()
+            progress.kept(source.stat().st_size if role == "primary" else 0)
+            if role == "primary":
+                progress.image_processed()
+            else:
+                progress.file_processed()
             logger.row(
                 disposition="kept_error",
                 event="move_skipped_destination_exists",
@@ -447,6 +478,11 @@ def process_duplicate_file(
         if move:
             destination.parent.mkdir(parents=True, exist_ok=True)
             shutil.move(str(source), str(destination))
+        progress.moved()
+        if role == "primary":
+            progress.image_processed()
+        else:
+            progress.file_processed()
         logger.row(
             disposition=disposition,
             event=event,

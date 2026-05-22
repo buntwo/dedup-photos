@@ -25,13 +25,13 @@ def main(argv: list[str] | None = None) -> int:
         if args.verify:
             if args.move:
                 parser.error("--verify cannot be combined with --move")
-            result = run_verify(args.inputs, args.output, log_path)
+            result = run_verify(args.inputs, args.output, log_path, show_progress=True)
             print(
                 f"Completed verify; checked={result.checked} matched={result.matched} "
                 f"failed={result.failed}; wrote CSV log to {result.log_path}"
             )
             return 1 if result.failed else 0
-        written_log = run_dedup(args.inputs, args.output, log_path, args.move)
+        written_log = run_dedup(args.inputs, args.output, log_path, args.move, show_progress=True)
     except ValueError as error:
         parser.error(str(error))
     mode = "move" if args.move else "dry run"
