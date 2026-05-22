@@ -282,8 +282,10 @@ def date_directory_score(path: Path) -> int:
 
 
 class CsvLogger:
-    def __init__(self, file: TextIO, mode: str) -> None:
-        self._writer = csv.DictWriter(file, fieldnames=CSV_FIELDS)
+    def __init__(self, file: TextIO, mode: str, hash_field: str = "xxh64") -> None:
+        self._hash_field = hash_field
+        fieldnames = [hash_field if field == "xxh64" else field for field in CSV_FIELDS]
+        self._writer = csv.DictWriter(file, fieldnames=fieldnames)
         self._mode = mode
         self._writer.writeheader()
 
@@ -318,7 +320,7 @@ class CsvLogger:
                 "destination_path": str(destination_path),
                 "keeper_path": str(keeper_path),
                 "size_bytes": size_bytes,
-                "xxh64": digest,
+                self._hash_field: digest,
                 "reason": reason,
                 "message": message,
             }
