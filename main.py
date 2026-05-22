@@ -1,5 +1,5 @@
-from dedup_photos.cli import main
+from dedup_photos.cli import manifest_main
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    raise SystemExit(manifest_main())

@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 
 from dedup_photos.constants import MANIFEST_VERSION
-from dedup_photos.cli import default_manifest_output_path, main, manifest_main
+from dedup_photos.cli import default_manifest_output_path, manifest_main
 from dedup_photos.manifest import MANIFEST_FIELDS
 from dedup_photos.manifest import execute_plan, generate_manifest, plan_from_manifests, verify_manifests, verify_move
 
@@ -668,17 +668,6 @@ def test_default_manifest_output_path_appends_manifest_suffix() -> None:
     assert default_manifest_output_path(Path("/local/project/google_photos")) == Path(
         "/local/project/google_photos.manifest.csv"
     )
-
-
-def test_direct_help_does_not_list_manifest_commands(capsys: pytest.CaptureFixture[str]) -> None:
-    with pytest.raises(SystemExit) as exit_info:
-        main(["--help"])
-
-    assert exit_info.value.code == 0
-    help_text = capsys.readouterr().out
-    assert "input photo library roots" in help_text
-    assert "dedup-photos-manifest --help" in help_text
-    assert "verify-move" not in help_text
 
 
 def test_manifest_help_lists_manifest_commands(capsys: pytest.CaptureFixture[str]) -> None:

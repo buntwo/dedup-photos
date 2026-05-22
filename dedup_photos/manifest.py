@@ -12,7 +12,7 @@ from typing import Iterable
 import xxhash
 
 from dedup_photos.constants import HASH_CHUNK_SIZE, MANIFEST_VERSION
-from dedup_photos.deduper import (
+from dedup_photos.common import (
     CsvLogger,
     date_directory_score,
     default_log_path,

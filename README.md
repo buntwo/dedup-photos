@@ -1,26 +1,6 @@
 # dedup-photos
 
-Find bit-exact duplicate photo files across one or more input directories.
-
-Dry run is the default:
-
-```bash
-uv run dedup-photos INPUT_ROOT [INPUT_ROOT ...] --output DUPLICATE_OUTPUT_DIR
-```
-
-Move duplicates only with the explicit flag:
-
-```bash
-uv run dedup-photos INPUT_ROOT [INPUT_ROOT ...] --output DUPLICATE_OUTPUT_DIR --move
-```
-
-Verify a duplicate output directory after a move:
-
-```bash
-uv run dedup-photos INPUT_ROOT [INPUT_ROOT ...] --output DUPLICATE_OUTPUT_DIR --verify
-```
-
-## Batch manifest workflow
+Find bit-exact duplicate photo files through CSV manifests.
 
 For slow NAS storage, copy batches to a faster local disk, hash them locally, and store the intended NAS paths in CSV manifests:
 
@@ -87,9 +67,9 @@ Every run writes a CSV log. Pass `--log path/to/log.csv` to choose the path; oth
 
 The CSV has a `disposition` column for one-column filtering, including values such as `kept_unique_primary`, `kept_duplicate_keeper`, `planned_duplicate_primary`, `moved_duplicate_primary`, `kept_error`, `verify_matched`, and `verify_failed`.
 
-While running from the CLI, progress is printed on stderr. Direct mode shows scan/hash/action phases. Manifest mode shows manifest hashing, CSV loading/planning, byte verification, plan execution, and move verification counters. Every progress line includes a phase-local percentage.
+While running from the CLI, progress is printed on stderr. Manifest mode shows manifest hashing, CSV loading/planning, byte verification, plan execution, and move verification counters. Every progress line includes a phase-local percentage.
 
-Moved files keep a parallel structure under the output directory, including the input root name:
+Moved files keep a parallel structure under the output directory, including the NAS root label from the manifest:
 
 ```text
 OUT/IN_1/foo/photo.jpg
