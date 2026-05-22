@@ -97,13 +97,18 @@ def is_primary_image(path: Path) -> bool:
     return path.suffix.lower() in PRIMARY_IMAGE_EXTENSIONS
 
 
-def scan_primary_files(input_roots: Iterable[InputRoot]) -> list[PrimaryFile]:
+def scan_primary_files(input_roots: Iterable[InputRoot], progress: Progress | None = None) -> list[PrimaryFile]:
     primaries: list[PrimaryFile] = []
     for input_root in input_roots:
         for path in sorted(input_root.path.rglob("*")):
+            if progress is not None:
+                progress.file_processed()
+                progress.advance()
             if path.is_symlink() or not path.is_file() or not is_primary_image(path):
                 continue
             stat = path.stat()
+            if progress is not None:
+                progress.primary_seen(stat.st_size)
             sidecars = tuple(find_sidecars(path))
             primaries.append(
                 PrimaryFile(
@@ -153,7 +158,10 @@ def files_equal(left: Path, right: Path) -> bool:
                 return True
 
 
-def build_duplicate_groups(primaries: Iterable[PrimaryFile]) -> tuple[list[DuplicateGroup], list[PrimaryFile], list[tuple[str, tuple[PrimaryFile, ...]]]]:
+def build_duplicate_groups(
+    primaries: Iterable[PrimaryFile],
+    progress: Progress | None = None,
+) -> tuple[list[DuplicateGroup], list[PrimaryFile], list[tuple[str, tuple[PrimaryFile, ...]]]]:
     by_size: dict[int, list[PrimaryFile]] = defaultdict(list)
     for primary in primaries:
         by_size[primary.size_bytes].append(primary)
@@ -170,13 +178,18 @@ def build_duplicate_groups(primaries: Iterable[PrimaryFile]) -> tuple[list[Dupli
 
         by_hash: dict[str, list[PrimaryFile]] = defaultdict(list)
         for primary in size_group:
-            by_hash[hash_file(primary.path)].append(primary)
+            digest = hash_file(primary.path)
+            by_hash[digest].append(primary)
+            if progress is not None:
+                progress.hash_seen(primary.size_bytes, digest)
 
         for digest, hash_group in sorted(by_hash.items()):
             if len(hash_group) == 1:
                 uniques.extend(hash_group)
                 continue
 
+            if progress is not None:
+                progress.byte_check_started()
             equal_sets = split_equal_files(hash_group)
             if len(equal_sets) > 1:
                 split_groups.append((digest, tuple(hash_group)))
@@ -184,6 +197,8 @@ def build_duplicate_groups(primaries: Iterable[PrimaryFile]) -> tuple[list[Dupli
                 if len(equal_set) == 1:
                     uniques.extend(equal_set)
                 else:
+                    if progress is not None:
+                        progress.duplicate_group_confirmed()
                     duplicate_groups.append(
                         DuplicateGroup(
                             group_id=f"g{group_number:06d}",
@@ -322,9 +337,15 @@ def run_dedup(
     actual_log_path = log_path or default_log_path()
     mode = "move" if move else "dry_run"
 
-    primaries = scan_primary_files(input_roots)
-    progress = Progress(mode=f"dedup {mode}", total_images=len(primaries), enabled=show_progress)
-    groups, uniques, split_groups = build_duplicate_groups(primaries)
+    progress = Progress(mode=f"dedup {mode}", total_images=0, enabled=show_progress)
+    scan_total = count_filesystem_entries(input_roots)
+    progress.start_phase("scan", scan_total)
+    primaries = scan_primary_files(input_roots, progress)
+    progress.total_images = len(primaries)
+    hash_total = count_hash_candidates(primaries)
+    progress.start_phase("hash", hash_total)
+    groups, uniques, split_groups = build_duplicate_groups(primaries, progress)
+    progress.start_phase("action", len(primaries))
 
     try:
         actual_log_path.parent.mkdir(parents=True, exist_ok=True)
@@ -383,6 +404,7 @@ def process_duplicate_group(
         for primary in group.files:
             progress.kept(primary.size_bytes)
             progress.image_processed()
+            progress.advance()
             logger.row(
                 disposition="kept_sidecar_conflict",
                 event="duplicate_primary_kept_due_to_sidecar_conflict",
@@ -427,6 +449,7 @@ def process_duplicate_group(
     )
     progress.kept(keeper.size_bytes)
     progress.image_processed()
+    progress.advance()
 
     for duplicate in group.files:
         if duplicate == keeper:
@@ -452,6 +475,7 @@ def process_duplicate_file(
             progress.kept(source.stat().st_size if role == "primary" else 0)
             if role == "primary":
                 progress.image_processed()
+                progress.advance()
             else:
                 progress.file_processed()
             logger.row(
@@ -475,12 +499,14 @@ def process_duplicate_file(
         status = "moved" if move else "planned"
         event = "duplicate_primary_move" if role == "primary" else "sidecar_move"
         disposition = f"{status}_duplicate_primary" if role == "primary" else f"{status}_sidecar"
+        source_size = source.stat().st_size
         if move:
             destination.parent.mkdir(parents=True, exist_ok=True)
             shutil.move(str(source), str(destination))
-        progress.moved()
+        progress.moved(source_size)
         if role == "primary":
             progress.image_processed()
+            progress.advance()
         else:
             progress.file_processed()
         logger.row(
@@ -493,7 +519,7 @@ def process_duplicate_file(
             source_path=source,
             destination_path=destination,
             keeper_path=keeper.path,
-            size_bytes=destination.stat().st_size if move else source.stat().st_size,
+            size_bytes=source_size,
             digest=group.digest if role == "primary" else "",
             reason="duplicate_of_keeper",
         )
@@ -501,3 +527,14 @@ def process_duplicate_file(
 
 def destination_for(output_root: Path, input_root: InputRoot, source: Path) -> Path:
     return output_root / input_root.label / source.relative_to(input_root.path)
+
+
+def count_filesystem_entries(input_roots: Iterable[InputRoot]) -> int:
+    return sum(1 for input_root in input_roots for _ in input_root.path.rglob("*"))
+
+
+def count_hash_candidates(primaries: Iterable[PrimaryFile]) -> int:
+    by_size: dict[int, int] = defaultdict(int)
+    for primary in primaries:
+        by_size[primary.size_bytes] += 1
+    return sum(count for count in by_size.values() if count > 1)

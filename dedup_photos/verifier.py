@@ -51,10 +51,15 @@ def run_verify(
     dupe_root = validate_dupe_root(dupe_path, input_roots)
     actual_log_path = log_path or default_log_path()
 
-    input_primaries = scan_verify_inputs(input_roots)
-    dupe_primaries = scan_verify_dupes(dupe_root)
-    index = build_verify_index([*input_primaries, *dupe_primaries])
-    progress = Progress(mode="verify", total_images=len(dupe_primaries), enabled=show_progress)
+    progress = Progress(mode="verify", total_images=0, enabled=show_progress)
+    progress.start_phase("scan-inputs", count_input_entries(input_roots))
+    input_primaries = scan_verify_inputs(input_roots, progress)
+    progress.start_phase("scan-dupes", count_dupe_entries(dupe_root))
+    dupe_primaries = scan_verify_dupes(dupe_root, progress)
+    progress.total_images = len(dupe_primaries)
+    progress.start_phase("index", len(input_primaries) + len(dupe_primaries))
+    index = build_verify_index([*input_primaries, *dupe_primaries], progress)
+    progress.start_phase("verify", len(dupe_primaries))
 
     matched = 0
     failed = 0
@@ -70,6 +75,7 @@ def run_verify(
                     failed += 1
                     progress.error()
                     progress.image_processed()
+                    progress.advance()
                     log_verify_failure(
                         logger,
                         dupe,
@@ -83,6 +89,7 @@ def run_verify(
                     failed += 1
                     progress.error()
                     progress.image_processed()
+                    progress.advance()
                     log_verify_failure(
                         logger,
                         dupe,
@@ -96,6 +103,7 @@ def run_verify(
                     failed += 1
                     progress.error()
                     progress.image_processed()
+                    progress.advance()
                     log_verify_failure(
                         logger,
                         dupe,
@@ -110,6 +118,7 @@ def run_verify(
                     counted_keeper_paths.add(expected_keeper.path)
                     progress.kept(expected_keeper.size_bytes)
                 progress.image_processed()
+                progress.advance()
                 logger.row(
                     disposition="verify_matched",
                     event="verify_output_primary",
@@ -133,13 +142,19 @@ def run_verify(
     )
 
 
-def scan_verify_inputs(input_roots: list[InputRoot]) -> list[VerifyPrimary]:
+def scan_verify_inputs(input_roots: list[InputRoot], progress: Progress | None = None) -> list[VerifyPrimary]:
     primaries: list[VerifyPrimary] = []
     for input_root in input_roots:
         for path in sorted(input_root.path.rglob("*")):
+            if progress is not None:
+                progress.file_processed()
+                progress.advance()
             if path.is_symlink() or not path.is_file() or not is_primary_image(path):
                 continue
             relative_path = path.relative_to(input_root.path)
+            stat = path.stat()
+            if progress is not None:
+                progress.primary_seen(stat.st_size)
             primaries.append(
                 VerifyPrimary(
                     path=path,
@@ -147,7 +162,7 @@ def scan_verify_inputs(input_roots: list[InputRoot]) -> list[VerifyPrimary]:
                     input_label=input_root.label,
                     relative_path=relative_path,
                     logical_parts=(input_root.label, *relative_path.parts),
-                    size_bytes=path.stat().st_size,
+                    size_bytes=stat.st_size,
                     digest=hash_file(path),
                     sidecars=tuple(independently_find_sidecars(path)),
                 )
@@ -155,13 +170,19 @@ def scan_verify_inputs(input_roots: list[InputRoot]) -> list[VerifyPrimary]:
     return primaries
 
 
-def scan_verify_dupes(dupe_root: Path) -> list[VerifyPrimary]:
+def scan_verify_dupes(dupe_root: Path, progress: Progress | None = None) -> list[VerifyPrimary]:
     primaries: list[VerifyPrimary] = []
     for path in sorted(dupe_root.rglob("*")):
+        if progress is not None:
+            progress.file_processed()
+            progress.advance()
         if path.is_symlink() or not path.is_file() or not is_primary_image(path):
             continue
         relative_path = path.relative_to(dupe_root)
         input_label = relative_path.parts[0] if relative_path.parts else dupe_root.name
+        stat = path.stat()
+        if progress is not None:
+            progress.primary_seen(stat.st_size)
         primaries.append(
             VerifyPrimary(
                 path=path,
@@ -169,7 +190,7 @@ def scan_verify_dupes(dupe_root: Path) -> list[VerifyPrimary]:
                 input_label=input_label,
                 relative_path=relative_path,
                 logical_parts=relative_path.parts,
-                size_bytes=path.stat().st_size,
+                size_bytes=stat.st_size,
                 digest=hash_file(path),
                 sidecars=tuple(independently_find_sidecars(path)),
             )
@@ -192,10 +213,15 @@ def independently_find_sidecars(primary_path: Path) -> list[Path]:
     return sidecars
 
 
-def build_verify_index(primaries: list[VerifyPrimary]) -> dict[tuple[int, str], list[VerifyPrimary]]:
+def build_verify_index(
+    primaries: list[VerifyPrimary],
+    progress: Progress | None = None,
+) -> dict[tuple[int, str], list[VerifyPrimary]]:
     index: dict[tuple[int, str], list[VerifyPrimary]] = defaultdict(list)
     for primary in primaries:
         index[(primary.size_bytes, primary.digest)].append(primary)
+        if progress is not None:
+            progress.advance()
     return index
 
 
@@ -274,3 +300,11 @@ def log_verify_failure(
         reason=reason,
         message=message,
     )
+
+
+def count_input_entries(input_roots: list[InputRoot]) -> int:
+    return sum(1 for input_root in input_roots for _ in input_root.path.rglob("*"))
+
+
+def count_dupe_entries(dupe_root: Path) -> int:
+    return sum(1 for _ in dupe_root.rglob("*"))

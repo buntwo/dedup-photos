@@ -59,11 +59,23 @@ def test_dedup_progress_line_reports_requested_fields(tmp_path: Path, capsys: py
     run_dedup([input_root], output_root, tmp_path / "log.csv", move=False, show_progress=True)
 
     progress = capsys.readouterr().err
-    assert "dedup dry_run:" in progress
-    assert "files=" in progress
+    assert "scan:" in progress
+    assert "hash:" in progress
+    assert "action:" in progress
+    assert "step=HASHING" in progress
+    assert "step=BYTE-CHECK" in progress
+    assert "hashed=2/2" in progress
+    assert "hash_match_groups=1" in progress
+    assert "hash_match_files=2" in progress
+    assert "confirmed_duplicate_groups=1" in progress
+    assert "entries_scanned=4/4" in progress
+    assert "images_found=2" in progress
+    assert "size_collision_groups=1" in progress
+    assert "size_collision_files=2" in progress
     assert "images=2/2" in progress
     assert "done=100.0%" in progress
-    assert "moved=1" in progress
+    assert "dupe_files=1" in progress
+    assert "dupe_size=4 B" in progress
     assert "errors=0" in progress
     assert "kept=" in progress
 
@@ -277,11 +289,18 @@ def test_verify_progress_line_reports_requested_fields(tmp_path: Path, capsys: p
     run_verify([input_root], output_root, tmp_path / "verify.csv", show_progress=True)
 
     progress = capsys.readouterr().err
+    assert "scan-inputs:" in progress
+    assert "scan-dupes:" in progress
+    assert "index:" in progress
     assert "verify:" in progress
-    assert "files=" in progress
+    assert "entries_scanned=1/1" in progress
+    assert "images_found=2" in progress
+    assert "size_collision_groups=1" in progress
+    assert "size_collision_files=2" in progress
     assert "images=1/1" in progress
     assert "done=100.0%" in progress
-    assert "moved=0" in progress
+    assert "dupe_files=0" in progress
+    assert "dupe_size=0 B" in progress
     assert "errors=0" in progress
     assert "kept=" in progress
 
