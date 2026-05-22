@@ -107,12 +107,18 @@ def build_manifest_parser() -> argparse.ArgumentParser:
             "Add --move to move duplicate primaries and their sidecars.\n\n"
             "Examples:\n"
             "  dedup-photos-manifest execute-plan move_plan.csv --log execute_dry_run.csv\n"
-            "  dedup-photos-manifest execute-plan move_plan.csv --move --log execute.csv"
+            "  dedup-photos-manifest execute-plan move_plan.csv --move --log execute.csv\n"
+            "  dedup-photos-manifest execute-plan move_plan.csv --move --verify-source-hashes --log execute.csv"
         ),
     )
     execute.add_argument("plan", type=Path, help="Move-plan CSV created by the plan subcommand.")
     execute.add_argument("--log", type=Path, default=None, help="CSV execution log to write.")
     execute.add_argument("--move", action="store_true", help="Actually move files. Default is dry run.")
+    execute.add_argument(
+        "--verify-source-hashes",
+        action="store_true",
+        help="Before moving, rehash planned source files and skip bundles whose current hashes differ from the plan.",
+    )
 
     verify_move_parser = subparsers.add_parser(
         "verify-move",
@@ -163,7 +169,13 @@ def manifest_main(argv: list[str] | None = None) -> int:
             )
             return 1 if result.failed_groups else 0
         if args.command == "execute-plan":
-            result = execute_plan(args.plan, args.log, args.move, show_progress=True)
+            result = execute_plan(
+                args.plan,
+                args.log,
+                args.move,
+                show_progress=True,
+                verify_source_hashes=args.verify_source_hashes,
+            )
             print(
                 f"Completed execute-plan; bundles={result.bundles} "
                 f"planned={result.planned_bundles} moved={result.moved_bundles} "

@@ -19,9 +19,9 @@ from dedup_photos.common import (
     has_mobilebackup_segment,
     has_takeout_segment,
     is_primary_image,
-    sidecar_belongs_to_primary,
 )
 from dedup_photos.progress import Progress
+from dedup_photos.inventory import classify_manifest_files, regular_files_by_directory
 
 
 MANIFEST_FIELDS = [
@@ -124,6 +124,7 @@ class PlanRow:
     file_role: str
     disposition: str
     hash_value: str
+    primary_source_path: Path | None
 
 
 @dataclass(frozen=True)
@@ -164,48 +165,39 @@ def generate_manifest(
     progress = Progress(mode="manifest", total_images=0, enabled=show_progress)
 
     try:
-        paths = sorted(local_root.rglob("*"))
-        regular_files = tuple(path for path in paths if not path.is_symlink() and path.is_file())
-        primary_paths = tuple(path for path in regular_files if is_primary_image(path))
-        sidecars_by_primary, uncategorized = classify_manifest_files(regular_files, primary_paths)
+        files_by_directory = regular_files_by_directory(local_root)
+        primary_paths = tuple(
+            path
+            for directory in sorted(files_by_directory, key=lambda item: item.relative_to(local_root).as_posix())
+            for path in sorted(
+                (file_path for file_path in files_by_directory[directory] if is_primary_image(file_path)),
+                key=lambda item: item.name.lower(),
+            )
+        )
+        sidecars_by_primary, uncategorized = classify_manifest_files(files_by_directory, primary_paths)
+        regular_file_count = sum(len(paths) for paths in files_by_directory.values())
         group_ids = {
             path: f"f{index:06d}"
             for index, path in enumerate(
-                sorted(primary_paths, key=lambda item: item.relative_to(local_root).as_posix()),
+                primary_paths,
                 start=1,
             )
         }
-        progress.start_phase("manifest-hash", len(regular_files))
+        progress.start_phase("manifest-hash", regular_file_count)
         manifest_path.parent.mkdir(parents=True, exist_ok=True)
         with manifest_path.open("w", newline="", encoding="utf-8") as file:
             writer = csv.DictWriter(file, fieldnames=MANIFEST_FIELDS)
             writer.writeheader()
-            for path in sorted(primary_paths, key=lambda item: item.relative_to(local_root).as_posix()):
-                relative_path = path.relative_to(local_root)
-                write_manifest_file_row(
-                    writer,
-                    path=path,
-                    local_root=local_root,
-                    nas_root=nas_root,
-                    manifest_version=MANIFEST_VERSION,
-                    created_at=created_at,
-                    batch_root=str(local_root),
-                    nas_root_str=nas_root_str,
-                    nas_root_label=nas_root_label,
-                    group_id=group_ids[path],
-                    file_role="primary",
-                    status="included",
-                    reason="",
-                    primary_path=None,
-                    progress=progress,
-                )
-                for sidecar in sorted(
-                    sidecars_by_primary[path],
-                    key=lambda item: item.relative_to(local_root).as_posix(),
-                ):
+            for directory in sorted(files_by_directory, key=lambda item: item.relative_to(local_root).as_posix()):
+                directory_primaries = [
+                    path
+                    for path in sorted(files_by_directory[directory], key=lambda item: item.name.lower())
+                    if is_primary_image(path)
+                ]
+                for path in directory_primaries:
                     write_manifest_file_row(
                         writer,
-                        path=sidecar,
+                        path=path,
                         local_root=local_root,
                         nas_root=nas_root,
                         manifest_version=MANIFEST_VERSION,
@@ -214,57 +206,56 @@ def generate_manifest(
                         nas_root_str=nas_root_str,
                         nas_root_label=nas_root_label,
                         group_id=group_ids[path],
-                        file_role="sidecar",
+                        file_role="primary",
                         status="included",
                         reason="",
-                        primary_path=path,
+                        primary_path=None,
                         progress=progress,
                     )
-            for path in sorted(uncategorized, key=lambda item: item.relative_to(local_root).as_posix()):
-                write_manifest_file_row(
-                    writer,
-                    path=path,
-                    local_root=local_root,
-                    nas_root=nas_root,
-                    manifest_version=MANIFEST_VERSION,
-                    created_at=created_at,
-                    batch_root=str(local_root),
-                    nas_root_str=nas_root_str,
-                    nas_root_label=nas_root_label,
-                    group_id="",
-                    file_role="uncategorized",
-                    status="skipped",
-                    reason=uncategorized[path],
-                    primary_path=None,
-                    progress=progress,
-                )
+                    for sidecar in sorted(sidecars_by_primary[path], key=lambda item: item.name.lower()):
+                        write_manifest_file_row(
+                            writer,
+                            path=sidecar,
+                            local_root=local_root,
+                            nas_root=nas_root,
+                            manifest_version=MANIFEST_VERSION,
+                            created_at=created_at,
+                            batch_root=str(local_root),
+                            nas_root_str=nas_root_str,
+                            nas_root_label=nas_root_label,
+                            group_id=group_ids[path],
+                            file_role="sidecar",
+                            status="included",
+                            reason="",
+                            primary_path=path,
+                            progress=progress,
+                        )
+                directory_uncategorized = [
+                    path
+                    for path in sorted(files_by_directory[directory], key=lambda item: item.name.lower())
+                    if path in uncategorized
+                ]
+                for path in directory_uncategorized:
+                    write_manifest_file_row(
+                        writer,
+                        path=path,
+                        local_root=local_root,
+                        nas_root=nas_root,
+                        manifest_version=MANIFEST_VERSION,
+                        created_at=created_at,
+                        batch_root=str(local_root),
+                        nas_root_str=nas_root_str,
+                        nas_root_label=nas_root_label,
+                        group_id="",
+                        file_role="uncategorized",
+                        status="skipped",
+                        reason=uncategorized[path],
+                        primary_path=None,
+                        progress=progress,
+                    )
     finally:
         progress.finish()
     return manifest_path
-
-
-def classify_manifest_files(
-    regular_files: tuple[Path, ...],
-    primary_paths: tuple[Path, ...],
-) -> tuple[dict[Path, list[Path]], dict[Path, str]]:
-    sidecars_by_primary: dict[Path, list[Path]] = {path: [] for path in primary_paths}
-    uncategorized: dict[Path, str] = {}
-    primary_set = set(primary_paths)
-    for path in regular_files:
-        if path in primary_set:
-            continue
-        matches = [
-            primary
-            for primary in primary_paths
-            if primary.parent == path.parent and sidecar_belongs_to_primary(path, primary)
-        ]
-        if len(matches) == 1:
-            sidecars_by_primary[matches[0]].append(path)
-        elif len(matches) > 1:
-            uncategorized[path] = "ambiguous_sidecar_multiple_primaries"
-        else:
-            uncategorized[path] = "unrecognized_non_primary"
-    return sidecars_by_primary, uncategorized
 
 
 def write_manifest_file_row(
@@ -658,6 +649,7 @@ def log_manifest_duplicate_plan(
             group_id=group_id,
             file_role="sidecar",
             input_root=duplicate.nas_root_label,
+            primary_source_path=duplicate.nas_path,
             source_path=path,
             destination_path=manifest_destination_for(output_root, duplicate.nas_root_label, relative_path),
             keeper_path=keeper.nas_path,
@@ -1149,7 +1141,13 @@ def verify_move_unexpected_outputs(
     return unexpected
 
 
-def execute_plan(plan_path: Path, log_path: Path | None, move: bool, show_progress: bool = False) -> ExecutePlanResult:
+def execute_plan(
+    plan_path: Path,
+    log_path: Path | None,
+    move: bool,
+    show_progress: bool = False,
+    verify_source_hashes: bool = False,
+) -> ExecutePlanResult:
     progress = Progress(mode="execute_plan", total_images=0, enabled=show_progress)
     try:
         progress.start_phase("manifest-load-plan", count_csv_data_rows(plan_path))
@@ -1174,6 +1172,7 @@ def execute_plan(plan_path: Path, log_path: Path | None, move: bool, show_progre
                     group_id=sidecar.group_id,
                     file_role="sidecar",
                     input_root=sidecar.row.get("input_root", ""),
+                    primary_source_path=sidecar.primary_source_path or "",
                     source_path=sidecar.source_path,
                     destination_path=sidecar.destination_path,
                     keeper_path=sidecar.row.get("keeper_path", ""),
@@ -1185,7 +1184,7 @@ def execute_plan(plan_path: Path, log_path: Path | None, move: bool, show_progre
                 progress.manifest_bundle_processed()
 
             for bundle in bundles:
-                validation = validate_plan_bundle(bundle, duplicate_destinations)
+                validation = validate_plan_bundle(bundle, duplicate_destinations, verify_source_hashes)
                 if validation == "already_moved":
                     already_moved_bundles += 1
                     log_bundle(logger, bundle, disposition_prefix="already_moved", status="kept", reason="already_moved")
@@ -1250,7 +1249,15 @@ def load_plan_bundles(plan_path: Path, progress: Progress | None = None) -> tupl
     with plan_path.open(newline="", encoding="utf-8") as file:
         reader = csv.DictReader(file)
         fieldnames = reader.fieldnames or []
-        required = {"disposition", "group_id", "file_role", "source_path", "destination_path", "size_bytes"}
+        required = {
+            "disposition",
+            "group_id",
+            "file_role",
+            "source_path",
+            "destination_path",
+            "size_bytes",
+            "primary_source_path",
+        }
         missing = required - set(fieldnames)
         if missing:
             raise ValueError(f"plan missing required fields {sorted(missing)}: {plan_path}")
@@ -1275,7 +1282,7 @@ def load_plan_bundles(plan_path: Path, progress: Progress | None = None) -> tupl
                     raise ValueError(f"multiple keeper rows for group_id {plan_row.group_id}: {plan_path}")
                 keepers[plan_row.group_id] = plan_row
 
-    sidecars_by_key: dict[tuple[str, Path, str], list[PlanRow]] = defaultdict(list)
+    sidecars_by_key: dict[tuple[str, Path], list[PlanRow]] = defaultdict(list)
     for sidecar in sidecars:
         sidecars_by_key[sidecar_bundle_key(sidecar)].append(sidecar)
 
@@ -1304,6 +1311,11 @@ def parse_plan_row(row: dict[str, str], hash_field: str, require_destination: bo
         raise ValueError(f"invalid size_bytes in plan row: {row}") from error
     if not row["source_path"] or (require_destination and not row["destination_path"]):
         raise ValueError(f"planned move row must include source_path and destination_path: {row}")
+    primary_source_path = Path(row["primary_source_path"]) if row["primary_source_path"] else None
+    if row["file_role"] == "sidecar" and primary_source_path is None:
+        raise ValueError(f"planned sidecar row must include primary_source_path: {row}")
+    if row["file_role"] != "sidecar" and primary_source_path is not None:
+        raise ValueError(f"non-sidecar plan row must not include primary_source_path: {row}")
     return PlanRow(
         row=row,
         source_path=Path(row["source_path"]),
@@ -1313,15 +1325,18 @@ def parse_plan_row(row: dict[str, str], hash_field: str, require_destination: bo
         file_role=row["file_role"],
         disposition=row["disposition"],
         hash_value=row.get(hash_field, ""),
+        primary_source_path=primary_source_path,
     )
 
 
-def primary_bundle_key(row: PlanRow) -> tuple[str, Path, str]:
-    return row.group_id, row.source_path.parent, row.source_path.stem
+def primary_bundle_key(row: PlanRow) -> tuple[str, Path]:
+    return row.group_id, row.source_path
 
 
-def sidecar_bundle_key(row: PlanRow) -> tuple[str, Path, str]:
-    return row.group_id, row.source_path.parent, row.source_path.stem
+def sidecar_bundle_key(row: PlanRow) -> tuple[str, Path]:
+    if row.primary_source_path is None:
+        raise ValueError(f"planned sidecar row missing primary_source_path: {row.row}")
+    return row.group_id, row.primary_source_path
 
 
 def duplicate_destination_paths(bundles: list[PlanBundle]) -> set[Path]:
@@ -1332,7 +1347,11 @@ def duplicate_destination_paths(bundles: list[PlanBundle]) -> set[Path]:
     return {path for path, count in counts.items() if count > 1}
 
 
-def validate_plan_bundle(bundle: PlanBundle, duplicate_destinations: set[Path]) -> str | None:
+def validate_plan_bundle(
+    bundle: PlanBundle,
+    duplicate_destinations: set[Path],
+    verify_source_hashes: bool = False,
+) -> str | None:
     rows = bundle_rows(bundle)
     keeper_validation = validate_keeper(bundle)
     if keeper_validation is not None:
@@ -1353,6 +1372,8 @@ def validate_plan_bundle(bundle: PlanBundle, duplicate_destinations: set[Path]) 
         return "partial_bundle_state" if any(state == "ready" for state in states) or any(state == "already_moved" for state in states) else "source_missing"
     if any(state == "already_moved" for state in states):
         return "partial_bundle_state"
+    if verify_source_hashes and not bundle_source_hashes_match(bundle):
+        return "source_hash_mismatch"
     return None
 
 
@@ -1364,6 +1385,17 @@ def validate_keeper(bundle: PlanBundle) -> str | None:
     if bundle.keeper.source_path.stat().st_size != bundle.keeper.size_bytes:
         return "keeper_size_mismatch"
     return None
+
+
+def bundle_source_hashes_match(bundle: PlanBundle) -> bool:
+    rows_to_check = (bundle.keeper, *bundle_rows(bundle))
+    return all(row_hash_matches(row) for row in rows_to_check if row is not None)
+
+
+def row_hash_matches(row: PlanRow) -> bool:
+    if not row.hash_value:
+        return False
+    return hash_file_xxh128(row.source_path) == row.hash_value
 
 
 def plan_row_state(row: PlanRow) -> str:
@@ -1407,6 +1439,7 @@ def log_bundle(
             group_id=row.group_id,
             file_role=row.file_role,
             input_root=row.row.get("input_root", ""),
+            primary_source_path=row.primary_source_path or "",
             source_path=row.source_path,
             destination_path=row.destination_path,
             keeper_path=row.row.get("keeper_path", ""),

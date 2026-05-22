@@ -48,6 +48,15 @@ uv run dedup-photos-manifest execute-plan manifest_move_plan.csv \
   --log manifest_execute.csv
 ```
 
+For extra safety on a mutable NAS tree, rehash planned source files immediately before moving. This is slower and rereads the files being moved, but catches same-size source changes since the manifest was created:
+
+```bash
+uv run dedup-photos-manifest execute-plan manifest_move_plan.csv \
+  --move \
+  --verify-source-hashes \
+  --log manifest_execute.csv
+```
+
 Manifest mode uses file size plus `xxh128` for primary image identity. Sidecar rows are used for keeper precedence and for moving duplicate bundles. Optional byte-level verification rereads the NAS paths referenced by primary rows in the manifests:
 
 ```bash
@@ -65,7 +74,7 @@ uv run dedup-photos-manifest verify-move /local/batch/google-photos.manifest.csv
 
 Every run writes a CSV log. Pass `--log path/to/log.csv` to choose the path; otherwise a timestamped log is written in the current directory.
 
-The CSV has a `disposition` column for one-column filtering, including values such as `kept_unique_primary`, `kept_duplicate_keeper`, `planned_duplicate_primary`, `moved_duplicate_primary`, `kept_error`, `verify_matched`, and `verify_failed`.
+The CSV has a `disposition` column for one-column filtering, including values such as `kept_unique_primary`, `kept_duplicate_keeper`, `planned_duplicate_primary`, `moved_duplicate_primary`, `kept_error`, `verify_matched`, and `verify_failed`. Plan and execution logs also include `primary_source_path` for sidecar rows, so sidecars such as `photo.jpg.json` can be tied back to their primary image without relying on filename stems.
 
 While running from the CLI, progress is printed on stderr. Manifest mode shows manifest hashing, CSV loading/planning, byte verification, plan execution, and move verification counters. Every progress line includes a phase-local percentage.
 

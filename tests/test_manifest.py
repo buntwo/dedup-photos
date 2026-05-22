@@ -45,7 +45,12 @@ def prepare_nas_root(local_root: Path, nas_parent: Path) -> Path:
     return nas_root
 
 
-def make_move_plan(tmp_path: Path, *, with_sidecars: bool = False) -> tuple[Path, Path, Path, Path]:
+def make_move_plan(
+    tmp_path: Path,
+    *,
+    with_sidecars: bool = False,
+    full_primary_prefix_sidecar: bool = False,
+) -> tuple[Path, Path, Path, Path]:
     nas_one = tmp_path / "nas-one"
     nas_two = tmp_path / "nas-two"
     output_root = tmp_path / "dupes"
@@ -55,8 +60,9 @@ def make_move_plan(tmp_path: Path, *, with_sidecars: bool = False) -> tuple[Path
     write(nas_one / "photo.jpg", b"same")
     write(nas_two / "photo.jpg", b"same")
     if with_sidecars:
-        write(nas_one / "photo.mov", b"live")
-        write(nas_two / "photo.mov", b"live")
+        sidecar_name = "photo.jpg.json" if full_primary_prefix_sidecar else "photo.mov"
+        write(nas_one / sidecar_name, b"live")
+        write(nas_two / sidecar_name, b"live")
     generate_manifest(nas_one, nas_one, manifest_one)
     generate_manifest(nas_two, nas_two, manifest_two)
     plan_from_manifests([manifest_one, manifest_two], output_root, plan_path)
@@ -159,6 +165,41 @@ def test_generate_manifest_marks_ambiguous_sidecar_as_uncategorized(tmp_path: Pa
     assert ambiguous["reason"] == "ambiguous_sidecar_multiple_primaries"
     assert ambiguous["group_id"] == ""
     assert ambiguous["xxh128"]
+
+
+def test_generate_manifest_marks_unrelated_non_primary_as_uncategorized(tmp_path: Path) -> None:
+    local_root = tmp_path / "google_photos"
+    nas_root = tmp_path / "nas" / "google_photos"
+    manifest_path = tmp_path / "manifest.csv"
+    write(local_root / "photo.jpg", b"image")
+    write(local_root / "unrelated.json", b"metadata")
+    prepare_nas_root(local_root, tmp_path / "nas")
+
+    generate_manifest(local_root, nas_root, manifest_path)
+
+    unrelated = [row for row in rows(manifest_path) if row["relative_path"] == "unrelated.json"][0]
+    assert unrelated["file_role"] == "uncategorized"
+    assert unrelated["status"] == "skipped"
+    assert unrelated["reason"] == "unrecognized_non_primary"
+    assert unrelated["group_id"] == ""
+
+
+def test_generate_manifest_dedupes_sidecar_match_paths(tmp_path: Path) -> None:
+    local_root = tmp_path / "google_photos"
+    nas_root = tmp_path / "nas" / "google_photos"
+    manifest_path = tmp_path / "manifest.csv"
+    write(local_root / "photo.jpg", b"image")
+    write(local_root / "photo.jpg.json", b"metadata")
+    prepare_nas_root(local_root, tmp_path / "nas")
+
+    generate_manifest(local_root, nas_root, manifest_path)
+
+    manifest_rows = rows(manifest_path)
+    primary = [row for row in manifest_rows if row["file_role"] == "primary"][0]
+    sidecars = [row for row in manifest_rows if row["file_role"] == "sidecar"]
+    assert len(sidecars) == 1
+    assert sidecars[0]["relative_path"] == "photo.jpg.json"
+    assert sidecars[0]["group_id"] == primary["group_id"]
 
 
 def test_generate_manifest_refuses_existing_manifest_path(tmp_path: Path) -> None:
@@ -455,8 +496,8 @@ def test_plan_from_manifests_emits_sidecar_move_destinations(tmp_path: Path) -> 
     assert sidecar_rows[0]["xxh128"]
 
 
-def test_plan_from_manifests_preserves_date_takeout_mobilebackup_precedence(tmp_path: Path) -> None:
-    local_one = tmp_path / "Sunday Funday"
+def test_plan_from_manifests_prefers_takeout_album_over_date_folder(tmp_path: Path) -> None:
+    local_one = tmp_path / "Trip to Turkey"
     local_two = tmp_path / "Photos from 2023"
     local_three = tmp_path / "mobilebackup"
     manifests = [tmp_path / "one.csv", tmp_path / "two.csv", tmp_path / "three.csv"]
@@ -498,6 +539,18 @@ def test_equivalent_sidecars_on_both_sides_allow_planning(tmp_path: Path) -> Non
     assert len([row for row in rows(log_path) if row["event"] == "duplicate_primary_move"]) == 1
     sidecar_move = [row for row in rows(log_path) if row["event"] == "sidecar_move"][0]
     assert sidecar_move["source_path"] == str(nas_two / "photo.mp4")
+
+
+def test_plan_sidecar_rows_include_primary_source_path(tmp_path: Path) -> None:
+    plan_path, _nas_one, nas_two, _output_root = make_move_plan(
+        tmp_path,
+        with_sidecars=True,
+        full_primary_prefix_sidecar=True,
+    )
+
+    sidecar = [row for row in rows(plan_path) if row["disposition"] == "planned_sidecar"][0]
+    assert sidecar["source_path"] == str(nas_two / "photo.jpg.json")
+    assert sidecar["primary_source_path"] == str(nas_two / "photo.jpg")
 
 
 def test_load_manifest_rejects_missing_fields(tmp_path: Path) -> None:
@@ -776,6 +829,32 @@ def test_verify_move_sidecar_conflict_group_must_remain_in_place(tmp_path: Path)
     assert {row["disposition"] for row in rows(log_path)} == {"verify_move_skipped_conflict_intact"}
 
 
+def test_verify_move_uses_takeout_album_precedence(tmp_path: Path) -> None:
+    local_one = tmp_path / "Trip to Turkey"
+    local_two = tmp_path / "Photos from 2021"
+    manifest_one = tmp_path / "trip.csv"
+    manifest_two = tmp_path / "date.csv"
+    output_root = tmp_path / "dupes"
+    write(local_one / "photo.jpg", b"same")
+    write(local_two / "photo.jpg", b"same")
+    nas_one = prepare_nas_root(local_one, tmp_path / "nas" / "takeout")
+    nas_two = prepare_nas_root(local_two, tmp_path / "nas" / "takeout" / "20240101")
+    write(nas_one / "photo.jpg", b"same")
+    write(nas_two / "photo.jpg", b"same")
+    generate_manifest(local_one, nas_one, manifest_one)
+    generate_manifest(local_two, nas_two, manifest_two)
+    plan_path = tmp_path / "plan.csv"
+    plan_from_manifests([manifest_one, manifest_two], output_root, plan_path)
+    execute_plan(plan_path, tmp_path / "execute.csv", move=True)
+    log_path = tmp_path / "verify_move.csv"
+
+    result = verify_move([manifest_one, manifest_two], output_root, log_path)
+
+    assert result.failed_paths == 0
+    keeper_rows = [row for row in rows(log_path) if row["event"] == "verify_move_keeper"]
+    assert keeper_rows[0]["source_path"] == str(nas_one / "photo.jpg")
+
+
 def test_verify_move_fails_when_sidecar_conflict_file_was_moved(tmp_path: Path) -> None:
     manifests, _nas_one, nas_two, output_root = make_conflict_manifests(tmp_path)
     destination = output_root / "nas-two" / "photo.json"
@@ -842,6 +921,27 @@ def test_execute_plan_move_moves_primary_and_sidecar_bundle(tmp_path: Path) -> N
     assert (output_root / "nas-two" / "photo.mov").read_bytes() == b"live"
     execute_rows = rows(log_path)
     assert {row["disposition"] for row in execute_rows} == {"moved_duplicate_primary", "moved_sidecar"}
+
+
+def test_execute_plan_moves_full_primary_prefix_sidecar(tmp_path: Path) -> None:
+    plan_path, nas_one, nas_two, output_root = make_move_plan(
+        tmp_path,
+        with_sidecars=True,
+        full_primary_prefix_sidecar=True,
+    )
+    log_path = tmp_path / "execute.csv"
+
+    result = execute_plan(plan_path, log_path, move=True)
+
+    assert result.moved_bundles == 1
+    assert result.orphan_sidecars == 0
+    assert (nas_one / "photo.jpg").exists()
+    assert (nas_one / "photo.jpg.json").exists()
+    assert not (nas_two / "photo.jpg").exists()
+    assert not (nas_two / "photo.jpg.json").exists()
+    assert (output_root / "nas-two" / "photo.jpg").read_bytes() == b"same"
+    assert (output_root / "nas-two" / "photo.jpg.json").read_bytes() == b"live"
+    assert "orphan_plan_sidecar" not in {row["disposition"] for row in rows(log_path)}
 
 
 def test_execute_plan_destination_collision_skips_bundle(tmp_path: Path) -> None:
@@ -952,6 +1052,47 @@ def test_execute_plan_source_size_mismatch_skips_bundle(tmp_path: Path) -> None:
     assert rows(log_path)[0]["reason"] == "source_size_mismatch"
 
 
+def test_execute_plan_default_does_not_hash_validate_same_size_source_change(tmp_path: Path) -> None:
+    plan_path, _nas_one, nas_two, output_root = make_move_plan(tmp_path)
+    (nas_two / "photo.jpg").write_bytes(b"diff")
+    log_path = tmp_path / "execute.csv"
+
+    result = execute_plan(plan_path, log_path, move=True)
+
+    assert result.moved_bundles == 1
+    assert not (nas_two / "photo.jpg").exists()
+    assert (output_root / "nas-two" / "photo.jpg").read_bytes() == b"diff"
+
+
+def test_execute_plan_hash_validation_catches_same_size_source_change(tmp_path: Path) -> None:
+    plan_path, _nas_one, nas_two, output_root = make_move_plan(tmp_path)
+    (nas_two / "photo.jpg").write_bytes(b"diff")
+    log_path = tmp_path / "execute.csv"
+
+    result = execute_plan(plan_path, log_path, move=True, verify_source_hashes=True)
+
+    assert result.skipped_bundles == 1
+    assert result.moved_bundles == 0
+    assert (nas_two / "photo.jpg").exists()
+    assert not (output_root / "nas-two" / "photo.jpg").exists()
+    assert rows(log_path)[0]["reason"] == "source_hash_mismatch"
+
+
+def test_execute_plan_hash_validation_catches_same_size_keeper_change(tmp_path: Path) -> None:
+    plan_path, nas_one, nas_two, output_root = make_move_plan(tmp_path)
+    (nas_one / "photo.jpg").write_bytes(b"diff")
+    log_path = tmp_path / "execute.csv"
+
+    result = execute_plan(plan_path, log_path, move=True, verify_source_hashes=True)
+
+    assert result.skipped_bundles == 1
+    assert result.moved_bundles == 0
+    assert (nas_one / "photo.jpg").exists()
+    assert (nas_two / "photo.jpg").exists()
+    assert not (output_root / "nas-two" / "photo.jpg").exists()
+    assert rows(log_path)[0]["reason"] == "source_hash_mismatch"
+
+
 def test_execute_plan_partial_already_moved_bundle_skips_bundle(tmp_path: Path) -> None:
     plan_path, _nas_one, nas_two, output_root = make_move_plan(tmp_path, with_sidecars=True)
     destination = output_root / "nas-two" / "photo.jpg"
@@ -1032,3 +1173,15 @@ def test_execute_plan_cli_dry_run_and_move(tmp_path: Path) -> None:
     assert (output_root / "nas-two" / "photo.jpg").exists()
     assert rows(dry_log)[0]["disposition"] == "planned_duplicate_primary"
     assert rows(move_log)[0]["disposition"] == "moved_duplicate_primary"
+
+
+def test_execute_plan_cli_verify_source_hashes(tmp_path: Path) -> None:
+    plan_path, _nas_one, nas_two, output_root = make_move_plan(tmp_path)
+    (nas_two / "photo.jpg").write_bytes(b"diff")
+    log_path = tmp_path / "execute.csv"
+
+    assert manifest_main(["execute-plan", str(plan_path), "--move", "--verify-source-hashes", "--log", str(log_path)]) == 1
+
+    assert (nas_two / "photo.jpg").exists()
+    assert not (output_root / "nas-two" / "photo.jpg").exists()
+    assert rows(log_path)[0]["reason"] == "source_hash_mismatch"

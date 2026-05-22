@@ -20,6 +20,7 @@ CSV_FIELDS = [
     "group_id",
     "file_role",
     "input_root",
+    "primary_source_path",
     "source_path",
     "destination_path",
     "keeper_path",
@@ -37,12 +38,6 @@ def default_log_path() -> Path:
 
 def is_primary_image(path: Path) -> bool:
     return path.suffix.lower() in PRIMARY_IMAGE_EXTENSIONS
-
-
-def sidecar_belongs_to_primary(candidate: Path, primary_path: Path) -> bool:
-    if candidate.stem == primary_path.stem:
-        return True
-    return candidate.name.lower().startswith(f"{primary_path.name}.".lower())
 
 
 def date_directory_score(path: Path) -> int:
@@ -74,6 +69,7 @@ class CsvLogger:
         group_id: str = "",
         file_role: str = "",
         input_root: str = "",
+        primary_source_path: Path | str = "",
         source_path: Path | str = "",
         destination_path: Path | str = "",
         keeper_path: Path | str = "",
@@ -92,6 +88,7 @@ class CsvLogger:
                 "group_id": group_id,
                 "file_role": file_role,
                 "input_root": input_root,
+                "primary_source_path": str(primary_source_path),
                 "source_path": str(source_path),
                 "destination_path": str(destination_path),
                 "keeper_path": str(keeper_path),
