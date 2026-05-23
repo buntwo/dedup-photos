@@ -7,7 +7,7 @@ from collections import Counter
 from pathlib import Path
 from typing import Any
 
-from dedup_photos.common import default_log_path
+from dedup_photos.common import default_log_path, prepare_new_output_path
 from dedup_photos.manifest_io import load_manifests
 from dedup_photos.models import JsonSidecarAnalysisResult, ManifestEntry
 from dedup_photos.planning import choose_manifest_keeper, manifest_duplicate_groups
@@ -50,8 +50,8 @@ def analyze_json_sidecars(
         differing_key_count = 0
         parse_errors = 0
 
-        actual_log_path.parent.mkdir(parents=True, exist_ok=True)
-        with actual_log_path.open("w", newline="", encoding="utf-8") as file:
+        prepare_new_output_path(actual_log_path, "JSON sidecar analysis log")
+        with actual_log_path.open("x", newline="", encoding="utf-8") as file:
             writer = csv.DictWriter(file, fieldnames=JSON_ANALYSIS_FIELDS)
             writer.writeheader()
             for group_id, group in conflict_groups:

@@ -281,6 +281,21 @@ def load_manifests(manifest_paths: Iterable[Path], progress: Progress | None = N
     return collapse_duplicate_manifest_paths(entries)
 
 
+def load_uncategorized_manifest_rows(manifest_paths: Iterable[Path]) -> list[ManifestInventoryRow]:
+    rows: list[ManifestInventoryRow] = []
+    for manifest_path in manifest_paths:
+        with manifest_path.open(newline="", encoding="utf-8") as file:
+            reader = csv.DictReader(file)
+            missing = set(MANIFEST_FIELDS) - set(reader.fieldnames or [])
+            if missing:
+                raise ValueError(f"manifest missing required fields {sorted(missing)}: {manifest_path}")
+            for row in reader:
+                inventory_row = parse_manifest_inventory_row(row, manifest_path)
+                if inventory_row.file_role == "uncategorized":
+                    rows.append(inventory_row)
+    return collapse_duplicate_uncategorized_paths(rows)
+
+
 def parse_manifest_inventory_row(row: dict[str, str], manifest_path: Path) -> ManifestInventoryRow:
     if row["manifest_version"] != MANIFEST_VERSION:
         raise ValueError(f"unsupported manifest version {row['manifest_version']}: {manifest_path}")
@@ -331,6 +346,19 @@ def collapse_duplicate_manifest_paths(entries: list[ManifestEntry]) -> list[Mani
     return list(by_path.values())
 
 
+def collapse_duplicate_uncategorized_paths(rows: list[ManifestInventoryRow]) -> list[ManifestInventoryRow]:
+    by_path: dict[Path, ManifestInventoryRow] = {}
+    for row in rows:
+        existing = by_path.get(row.nas_path)
+        if existing is None:
+            by_path[row.nas_path] = row
+            continue
+        if manifest_inventory_rows_match(existing, row):
+            continue
+        raise ValueError(f"conflicting duplicate nas_path in manifests: {row.nas_path}")
+    return list(by_path.values())
+
+
 def manifest_entries_match(left: ManifestEntry, right: ManifestEntry) -> bool:
     return (
         left.nas_root == right.nas_root
@@ -342,4 +370,20 @@ def manifest_entries_match(left: ManifestEntry, right: ManifestEntry) -> bool:
         and left.sidecar_relative_paths == right.sidecar_relative_paths
         and left.sidecar_sizes == right.sidecar_sizes
         and left.sidecar_xxh128s == right.sidecar_xxh128s
+    )
+
+
+def manifest_inventory_rows_match(left: ManifestInventoryRow, right: ManifestInventoryRow) -> bool:
+    return (
+        left.batch_root == right.batch_root
+        and left.nas_root == right.nas_root
+        and left.nas_root_label == right.nas_root_label
+        and left.file_role == right.file_role
+        and left.status == right.status
+        and left.reason == right.reason
+        and left.relative_path == right.relative_path
+        and left.size_bytes == right.size_bytes
+        and left.xxh128 == right.xxh128
+        and left.primary_nas_path == right.primary_nas_path
+        and left.primary_relative_path == right.primary_relative_path
     )

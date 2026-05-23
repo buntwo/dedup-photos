@@ -6,7 +6,7 @@ from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
 
-from dedup_photos.common import CsvLogger, default_log_path
+from dedup_photos.common import CsvLogger, default_log_path, prepare_new_output_path
 from dedup_photos.hashing import hash_file_xxh128
 from dedup_photos.models import ExecutePlanResult, PlanBundle, PlanRow
 from dedup_photos.progress import Progress
@@ -48,8 +48,8 @@ def execute_plan(
         skipped_bundles = 0
 
         progress.start_phase("manifest-execute", len(orphan_sidecars) + len(bundles))
-        actual_log_path.parent.mkdir(parents=True, exist_ok=True)
-        with actual_log_path.open("w", newline="", encoding="utf-8") as file:
+        prepare_new_output_path(actual_log_path, "execute log")
+        with actual_log_path.open("x", newline="", encoding="utf-8") as file:
             logger = CsvLogger(file, mode=mode, hash_field=hash_field)
             for sidecar in orphan_sidecars:
                 logger.row(
@@ -185,19 +185,23 @@ def load_plan_bundles(plan_path: Path, progress: Progress | None = None) -> tupl
             disposition = row["disposition"]
             if disposition not in {
                 "planned_duplicate_primary",
+                "planned_duplicate_uncategorized",
                 "planned_duplicate_sidecar",
                 "planned_sidecar_merge",
                 "kept_duplicate_keeper",
+                "kept_duplicate_uncategorized",
             }:
                 continue
-            plan_row = parse_plan_row(row, hash_field, require_destination=disposition != "kept_duplicate_keeper")
+            plan_row = parse_plan_row(row, hash_field, require_destination=disposition not in {"kept_duplicate_keeper", "kept_duplicate_uncategorized"})
             if plan_row.file_role == "primary" and disposition == "planned_duplicate_primary":
+                primaries.append(plan_row)
+            elif plan_row.file_role == "uncategorized" and disposition == "planned_duplicate_uncategorized":
                 primaries.append(plan_row)
             elif plan_row.file_role == "sidecar" and disposition == "planned_duplicate_sidecar":
                 sidecars.append(plan_row)
             elif plan_row.file_role == "sidecar" and disposition == "planned_sidecar_merge":
                 merges.append(plan_row)
-            elif plan_row.file_role == "primary" and disposition == "kept_duplicate_keeper":
+            elif plan_row.file_role in {"primary", "uncategorized"} and disposition in {"kept_duplicate_keeper", "kept_duplicate_uncategorized"}:
                 if plan_row.group_id in keepers:
                     raise ValueError(f"multiple keeper rows for group_id {plan_row.group_id}: {plan_path}")
                 keepers[plan_row.group_id] = plan_row
@@ -505,11 +509,11 @@ def log_keeper(logger: CsvLogger, bundle: PlanBundle, validation: BundleValidati
     diagnostic = validation.keeper or FileDiagnostic()
     keeper_is_error = validation.result in {"keeper_missing", "keeper_size_mismatch", "keeper_hash_mismatch"}
     logger.row(
-        disposition="keeper_error" if keeper_is_error else "verified_keeper",
+        disposition=keeper_disposition(bundle.keeper, keeper_is_error),
         event="execute_plan_keeper",
         status="error" if keeper_is_error else "kept",
         group_id=bundle.keeper.group_id,
-        file_role="keeper",
+        file_role=bundle.keeper.file_role if bundle.keeper.file_role == "uncategorized" else "keeper",
         input_root=bundle.keeper.row.get("input_root", ""),
         source_path=bundle.keeper.source_path,
         keeper_path=bundle.keeper.source_path,
@@ -545,7 +549,7 @@ def log_bundle(
             disposition = already_moved_disposition(row)
             action_taken = "already_moved"
         elif disposition_prefix == "skipped_error":
-            disposition = "skipped_error_primary" if row.file_role == "primary" else "skipped_error_sidecar"
+            disposition = skipped_error_disposition(row)
             action_taken = "skipped"
         else:
             disposition = disposition_prefix
@@ -574,6 +578,8 @@ def log_bundle(
 
 
 def moved_disposition(row: PlanRow, diagnostic: FileDiagnostic) -> str:
+    if row.file_role == "uncategorized":
+        return "moved_duplicate_uncategorized"
     if row.file_role == "primary":
         return "moved_duplicate_primary"
     if row.disposition == "planned_sidecar_merge" and diagnostic.action_destination == row.destination_path:
@@ -582,6 +588,8 @@ def moved_disposition(row: PlanRow, diagnostic: FileDiagnostic) -> str:
 
 
 def already_moved_disposition(row: PlanRow) -> str:
+    if row.file_role == "uncategorized":
+        return "already_moved_duplicate_uncategorized"
     if row.file_role == "primary":
         return "already_moved_duplicate_primary"
     if row.disposition == "planned_sidecar_merge":
@@ -590,11 +598,27 @@ def already_moved_disposition(row: PlanRow) -> str:
 
 
 def execute_event(row: PlanRow) -> str:
+    if row.file_role == "uncategorized":
+        return "execute_plan_uncategorized_move"
     if row.file_role == "primary":
         return "execute_plan_move"
     if row.disposition == "planned_sidecar_merge":
         return "execute_plan_sidecar_merge"
     return "execute_plan_sidecar_move"
+
+
+def keeper_disposition(row: PlanRow, keeper_is_error: bool) -> str:
+    if row.file_role == "uncategorized":
+        return "uncategorized_keeper_error" if keeper_is_error else "verified_uncategorized_keeper"
+    return "keeper_error" if keeper_is_error else "verified_keeper"
+
+
+def skipped_error_disposition(row: PlanRow) -> str:
+    if row.file_role == "primary":
+        return "skipped_error_primary"
+    if row.file_role == "uncategorized":
+        return "skipped_error_uncategorized"
+    return "skipped_error_sidecar"
 
 
 def rollback_moves(moved_sources: list[tuple[Path, Path]]) -> list[str]:

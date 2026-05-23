@@ -5,7 +5,7 @@ from pathlib import Path
 import pytest
 
 import dedup_photos.execute as execute_module
-from dedup_photos.manifest import execute_plan
+from dedup_photos.manifest import execute_plan, generate_manifest, plan_from_manifests
 from tests.helpers import make_move_case, make_sidecar_merge_case, rows, write, write_csv
 
 
@@ -34,6 +34,18 @@ def test_execute_plan_dry_run_validates_without_moving(tmp_path: Path) -> None:
     assert execute_rows[0]["event"] == "execute_plan_move"
     assert execute_rows[0]["action_taken"] == "planned"
     assert execute_rows[0]["hash_check"] == "not_checked"
+
+
+def test_execute_plan_refuses_existing_log_path(tmp_path: Path) -> None:
+    case = make_move_case(tmp_path)
+    log_path = tmp_path / "execute.csv"
+    log_path.write_text("do not overwrite\n", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="execute log already exists"):
+        execute_plan(case.plan_path, log_path, move=False)
+
+    assert log_path.read_text(encoding="utf-8") == "do not overwrite\n"
+
 
 def test_execute_plan_dry_run_does_not_hash_validate_by_default(tmp_path: Path) -> None:
     case = make_move_case(tmp_path)
@@ -83,6 +95,32 @@ def test_execute_plan_move_moves_primary_and_sidecar_bundle(tmp_path: Path) -> N
     moved_rows = execute_rows_without_keeper(log_path)
     assert {row["action_taken"] for row in moved_rows} == {"moved"}
     assert {row["hash_check"] for row in moved_rows} == {"matched"}
+
+
+def test_execute_plan_moves_uncategorized_duplicate(tmp_path: Path) -> None:
+    nas_one = tmp_path / "nas-one"
+    nas_two = tmp_path / "nas-two"
+    output_root = tmp_path / "dupes"
+    manifest_one = tmp_path / "one.csv"
+    manifest_two = tmp_path / "two.csv"
+    plan_path = tmp_path / "plan.csv"
+    log_path = tmp_path / "execute.csv"
+    write(nas_one / "clip.bin", b"same standalone")
+    write(nas_two / "clip.bin", b"same standalone")
+    generate_manifest(nas_one, nas_one, manifest_one)
+    generate_manifest(nas_two, nas_two, manifest_two)
+    plan_from_manifests([manifest_one, manifest_two], output_root, plan_path)
+
+    result = execute_plan(plan_path, log_path, move=True)
+
+    execute_rows = rows(log_path)
+    assert result.moved_bundles == 1
+    assert (nas_one / "clip.bin").exists()
+    assert not (nas_two / "clip.bin").exists()
+    assert (output_root / "nas-two" / "clip.bin").read_bytes() == b"same standalone"
+    assert [row for row in execute_rows if row["disposition"] == "verified_uncategorized_keeper"]
+    moved = [row for row in execute_rows if row["disposition"] == "moved_duplicate_uncategorized"][0]
+    assert moved["file_role"] == "uncategorized"
 
 
 def test_execute_plan_rolls_back_primary_when_sidecar_move_fails(

@@ -9,9 +9,10 @@ from dedup_photos.common import (
     default_log_path,
     has_mobilebackup_segment,
     has_takeout_segment,
+    prepare_new_output_path,
 )
-from dedup_photos.manifest_io import load_manifests
-from dedup_photos.models import ManifestEntry, ManifestPlanResult
+from dedup_photos.manifest_io import load_manifests, load_uncategorized_manifest_rows
+from dedup_photos.models import ManifestEntry, ManifestInventoryRow, ManifestPlanResult
 from dedup_photos.progress import Progress
 
 VIDEO_SIDECAR_EXTENSIONS = {".mov", ".mp4"}
@@ -29,15 +30,17 @@ def plan_from_manifests(
     try:
         progress.start_phase("manifest-load", len(manifest_paths))
         entries = load_manifests(manifest_paths, progress)
+        uncategorized_entries = load_uncategorized_manifest_rows(manifest_paths)
         actual_log_path = log_path or default_log_path()
         groups, uniques = manifest_duplicate_groups(entries)
-        progress.manifest_group_stats(len(groups), len(uniques))
-        progress.start_phase("manifest-plan", len(uniques) + len(groups))
+        uncategorized_groups, uncategorized_uniques = uncategorized_duplicate_groups(uncategorized_entries)
+        progress.manifest_group_stats(len(groups) + len(uncategorized_groups), len(uniques) + len(uncategorized_uniques))
+        progress.start_phase("manifest-plan", len(uniques) + len(groups) + len(uncategorized_uniques) + len(uncategorized_groups))
         duplicate_files = 0
         skipped_groups = 0
 
-        actual_log_path.parent.mkdir(parents=True, exist_ok=True)
-        with actual_log_path.open("w", newline="", encoding="utf-8") as file:
+        prepare_new_output_path(actual_log_path, "plan log")
+        with actual_log_path.open("x", newline="", encoding="utf-8") as file:
             logger = CsvLogger(file, mode="manifest_plan", hash_field="xxh128")
             for unique in sorted(uniques, key=manifest_sort_key):
                 logger.row(
@@ -59,6 +62,19 @@ def plan_from_manifests(
                     event="unique_sidecar",
                     status="unique",
                     reason="primary_is_unique",
+                )
+                progress.advance()
+            for unique in sorted(uncategorized_uniques, key=uncategorized_sort_key):
+                logger.row(
+                    disposition="kept_unique_uncategorized",
+                    event="unique_uncategorized",
+                    status="unique",
+                    file_role="uncategorized",
+                    input_root=unique.nas_root_label,
+                    source_path=unique.nas_path,
+                    size_bytes=unique.size_bytes,
+                    digest=unique.xxh128,
+                    message="no equal uncategorized file found in manifests",
                 )
                 progress.advance()
             for index, group in enumerate(groups, start=1):
@@ -111,10 +127,46 @@ def plan_from_manifests(
                         ignore_json_sidecar_fields=ignore_json_sidecar_fields,
                     )
                 progress.advance()
+            for index, group in enumerate(uncategorized_groups, start=1):
+                group_id = f"u{index:06d}"
+                keeper = choose_uncategorized_keeper(group)
+                logger.row(
+                    disposition="kept_duplicate_uncategorized",
+                    event="keeper_uncategorized",
+                    status="kept",
+                    group_id=group_id,
+                    file_role="uncategorized",
+                    input_root=keeper.nas_root_label,
+                    source_path=keeper.nas_path,
+                    keeper_path=keeper.nas_path,
+                    size_bytes=keeper.size_bytes,
+                    digest=keeper.xxh128,
+                    reason="selected_by_manifest_priority",
+                )
+                for duplicate in sorted(group, key=uncategorized_sort_key):
+                    if duplicate == keeper:
+                        continue
+                    duplicate_files += 1
+                    progress.manifest_planned_move()
+                    logger.row(
+                        disposition="planned_duplicate_uncategorized",
+                        event="duplicate_uncategorized_move",
+                        status="planned",
+                        group_id=group_id,
+                        file_role="uncategorized",
+                        input_root=duplicate.nas_root_label,
+                        source_path=duplicate.nas_path,
+                        destination_path=manifest_destination_for(output_root, duplicate.nas_root_label, duplicate.relative_path),
+                        keeper_path=keeper.nas_path,
+                        size_bytes=duplicate.size_bytes,
+                        digest=duplicate.xxh128,
+                        reason="duplicate_of_keeper",
+                    )
+                progress.advance()
 
         return ManifestPlanResult(
             log_path=actual_log_path,
-            duplicate_groups=len(groups),
+            duplicate_groups=len(groups) + len(uncategorized_groups),
             duplicate_files=duplicate_files,
             skipped_groups=skipped_groups,
         )
@@ -135,6 +187,36 @@ def manifest_duplicate_groups(entries: list[ManifestEntry]) -> tuple[list[list[M
         else:
             groups.append(bucket)
     return groups, uniques
+
+
+def uncategorized_duplicate_groups(
+    entries: list[ManifestInventoryRow],
+) -> tuple[list[list[ManifestInventoryRow]], list[ManifestInventoryRow]]:
+    buckets: dict[tuple[int, str], list[ManifestInventoryRow]] = defaultdict(list)
+    for entry in entries:
+        buckets[(entry.size_bytes, entry.xxh128)].append(entry)
+
+    groups: list[list[ManifestInventoryRow]] = []
+    uniques: list[ManifestInventoryRow] = []
+    for bucket in buckets.values():
+        if len(bucket) == 1:
+            uniques.extend(bucket)
+        else:
+            groups.append(bucket)
+    return groups, uniques
+
+
+def choose_uncategorized_keeper(group: list[ManifestInventoryRow]) -> ManifestInventoryRow:
+    return sorted(group, key=uncategorized_keeper_key)[0]
+
+
+def uncategorized_keeper_key(entry: ManifestInventoryRow) -> tuple[int, int, str, str]:
+    return (
+        manifest_path_class(entry.nas_path),
+        date_directory_score(entry.nas_path),
+        entry.nas_root_label.lower(),
+        entry.relative_path.as_posix().lower(),
+    )
 
 
 def choose_manifest_keeper(group: list[ManifestEntry], ignore_json_sidecar_fields: bool = False) -> ManifestEntry | None:
@@ -267,6 +349,10 @@ def manifest_path_class(path: Path) -> int:
 
 
 def manifest_sort_key(entry: ManifestEntry) -> tuple[str, str]:
+    return entry.nas_root_label.lower(), entry.relative_path.as_posix().lower()
+
+
+def uncategorized_sort_key(entry: ManifestInventoryRow) -> tuple[str, str]:
     return entry.nas_root_label.lower(), entry.relative_path.as_posix().lower()
 
 

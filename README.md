@@ -14,7 +14,7 @@ uv run python -c 'from dedup_photos.constants import PRIMARY_IMAGE_EXTENSIONS; p
 
 Other regular files are still recorded in manifests, but they are marked as either `sidecar` or `uncategorized`.
 
-Sidecars are files associated with a primary image, such as Live Photo videos or JSON metadata. They affect keeper selection and move together with duplicate primary images. Uncategorized files are hashed for audit/debugging, but are not deduped.
+Sidecars are files associated with a primary image, such as Live Photo videos or JSON metadata. They affect keeper selection and move together with duplicate primary images. Uncategorized files are deduped independently as simple single-file exact-hash duplicates.
 
 ## Install
 
@@ -137,7 +137,7 @@ This flag is not the default. It does not edit JSON files; it keeps the keeper b
 
 ### 3. Verify Bytes
 
-`verify-bytes` rereads NAS files in same-size/same-hash manifest buckets and performs byte-level comparisons. It checks primary images and sidecars.
+`verify-bytes` rereads NAS files in same-size/same-hash manifest buckets and performs byte-level comparisons. It checks primary images, sidecars, and uncategorized files.
 
 ```bash
 uv run dedup-photos verify-bytes \
@@ -242,6 +242,30 @@ For plan and execution logs, the main thing to inspect is `disposition`:
 python3 -c 'import collections, csv, sys; counts=collections.Counter(row["disposition"] for row in csv.DictReader(open(sys.argv[1], newline="", encoding="utf-8"))); [print(disposition, counts[disposition]) for disposition in sorted(counts)]' move_plan.csv
 ```
 
+For any log, print only error rows:
+
+```bash
+python3 -c 'import csv, sys; rows=[row for row in csv.DictReader(open(sys.argv[1], newline="", encoding="utf-8")) if row.get("status") == "error"]; [print(row.get("disposition", ""), row.get("event", ""), row.get("reason", ""), row.get("source_path", "") or row.get("destination_path", "")) for row in rows]; sys.exit(1 if rows else 0)' LOG.csv
+```
+
+For `verify-bytes`, any error is a byte-identity failure in a same-size/same-hash group. Check these before moving:
+
+```bash
+python3 -c 'import csv, sys; rows=[row for row in csv.DictReader(open(sys.argv[1], newline="", encoding="utf-8")) if row["disposition"] == "verify_failed"]; [print(row["event"], row["file_role"], row["reason"], row["source_path"]) for row in rows]; sys.exit(1 if rows else 0)' byte_verify.csv
+```
+
+For `execute-plan`, inspect rows where execution deviated from the plan:
+
+```bash
+python3 -c 'import csv, sys; rows=[row for row in csv.DictReader(open(sys.argv[1], newline="", encoding="utf-8")) if row.get("status") == "error" or row.get("validation_result") not in ("", "validated", "already_moved")]; [print(row.get("disposition", ""), row.get("validation_result", ""), row.get("reason", ""), row.get("source_path", "") or row.get("destination_path", "")) for row in rows]; sys.exit(1 if rows else 0)' execute.csv
+```
+
+For `verify-move`, check both failed expected paths and unexpected output files:
+
+```bash
+python3 -c 'import csv, sys; rows=[row for row in csv.DictReader(open(sys.argv[1], newline="", encoding="utf-8")) if row["disposition"] in ("verify_move_failed", "verify_move_unexpected_output")]; [print(row["disposition"], row["reason"], row.get("source_path", "") or row.get("destination_path", "")) for row in rows]; sys.exit(1 if rows else 0)' move_verify.csv
+```
+
 ## Keeper Rules
 
 For files with identical primary image size and hash, the kept copy is selected by precedence:
@@ -258,9 +282,11 @@ Only non-keeper duplicates are planned for movement. Unique primary images are n
 
 By default, JSON sidecars are compared strictly like other sidecars. `plan --ignore-json-sidecar-fields` treats `.json` sidecars as equivalent regardless of JSON field/content differences, while keeping motion sidecars such as `.mov` and `.mp4` strict.
 
+Uncategorized files use the same exact `(size_bytes, xxh128)` grouping and path precedence, but no sidecar rules apply. Sidecar rows are never deduped independently.
+
 ## CSV Outputs
 
-Every command writes a CSV log. Pass `--log path/to/log.csv` to choose the path; otherwise the command writes a timestamped log in the current directory.
+Every command writes a CSV log. Pass `--log path/to/log.csv` to choose the path; otherwise the command writes a timestamped log in the current directory. Output files are never overwritten; if the target log or manifest already exists, the command exits with an error.
 
 Manifest CSVs contain one data row per regular non-symlink file under the local batch root. Rows include:
 
@@ -281,21 +307,29 @@ Plan and execution CSVs include a `disposition` column intended for easy filteri
 
 - `kept_unique_primary`
 - `kept_unique_sidecar`
+- `kept_unique_uncategorized`
 - `kept_duplicate_keeper`
 - `kept_duplicate_keeper_sidecar`
+- `kept_duplicate_uncategorized`
 - `planned_duplicate_primary`
 - `planned_duplicate_sidecar`
 - `planned_sidecar_merge`
+- `planned_duplicate_uncategorized`
 - `verified_keeper`
+- `verified_uncategorized_keeper`
 - `keeper_error`
+- `uncategorized_keeper_error`
 - `moved_duplicate_primary`
 - `moved_duplicate_sidecar`
 - `merged_sidecar`
+- `moved_duplicate_uncategorized`
 - `already_moved_duplicate_primary`
 - `already_moved_sidecar`
+- `already_moved_duplicate_uncategorized`
 - `already_merged_sidecar`
 - `skipped_error_primary`
 - `skipped_error_sidecar`
+- `skipped_error_uncategorized`
 - `orphan_plan_sidecar`
 - `verify_matched`
 - `verify_failed`

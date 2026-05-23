@@ -5,10 +5,10 @@ from collections import Counter, defaultdict
 from dataclasses import dataclass
 from pathlib import Path
 
-from dedup_photos.common import CsvLogger, default_log_path
+from dedup_photos.common import CsvLogger, default_log_path, prepare_new_output_path
 from dedup_photos.hashing import files_equal_by_path
-from dedup_photos.manifest_io import load_manifests
-from dedup_photos.models import ManifestEntry, ManifestVerifyResult, VerifyMoveResult
+from dedup_photos.manifest_io import load_manifests, load_uncategorized_manifest_rows
+from dedup_photos.models import ManifestEntry, ManifestInventoryRow, ManifestVerifyResult, VerifyMoveResult
 from dedup_photos.progress import Progress
 
 
@@ -38,8 +38,10 @@ def verify_manifests(
     try:
         progress.start_phase("manifest-load", len(manifest_paths))
         entries = load_manifests(manifest_paths, progress)
+        uncategorized_entries = load_uncategorized_manifest_rows(manifest_paths)
         primary_groups, uniques = manifest_duplicate_groups(entries)
         sidecar_groups = manifest_sidecar_duplicate_groups(entries)
+        uncategorized_groups = manifest_uncategorized_duplicate_groups(uncategorized_entries)
         byte_check_groups = [
             ("primary", f"m{index:06d}", manifest_entry_byte_check_items(group))
             for index, group in enumerate(primary_groups, start=1)
@@ -48,13 +50,17 @@ def verify_manifests(
             ("sidecar", f"s{index:06d}", group)
             for index, group in enumerate(sidecar_groups, start=1)
         )
+        byte_check_groups.extend(
+            ("uncategorized", f"u{index:06d}", group)
+            for index, group in enumerate(uncategorized_groups, start=1)
+        )
         progress.manifest_group_stats(len(byte_check_groups), len(uniques))
         progress.start_phase("manifest-verify-bytes", len(byte_check_groups))
         actual_log_path = log_path or default_log_path()
         failed_groups = 0
 
-        actual_log_path.parent.mkdir(parents=True, exist_ok=True)
-        with actual_log_path.open("w", newline="", encoding="utf-8") as file:
+        prepare_new_output_path(actual_log_path, "verify log")
+        with actual_log_path.open("x", newline="", encoding="utf-8") as file:
             logger = CsvLogger(file, mode="manifest_verify", hash_field="xxh128")
             for file_role, group_id, group in byte_check_groups:
                 failures = byte_check_item_group(group, progress)
@@ -143,6 +149,21 @@ def manifest_sidecar_duplicate_groups(entries: list[ManifestEntry]) -> list[list
     return [bucket for bucket in buckets.values() if len(bucket) > 1]
 
 
+def manifest_uncategorized_duplicate_groups(entries: list[ManifestInventoryRow]) -> list[list[ByteCheckItem]]:
+    buckets: dict[tuple[int, str], list[ByteCheckItem]] = defaultdict(list)
+    for entry in entries:
+        buckets[(entry.size_bytes, entry.xxh128)].append(
+            ByteCheckItem(
+                path=entry.nas_path,
+                size_bytes=entry.size_bytes,
+                digest=entry.xxh128,
+                input_root=entry.nas_root_label,
+                file_role="uncategorized",
+            )
+        )
+    return [bucket for bucket in buckets.values() if len(bucket) > 1]
+
+
 def verify_move(
     manifest_paths: list[Path],
     output_root: Path,
@@ -154,6 +175,7 @@ def verify_move(
     try:
         progress.start_phase("manifest-load", len(manifest_paths))
         entries = load_manifests(manifest_paths, progress)
+        uncategorized_entries = load_uncategorized_manifest_rows(manifest_paths)
         actual_log_path = log_path or default_log_path()
         expected_destinations: set[Path] = set()
         checked_paths = 0
@@ -165,13 +187,18 @@ def verify_move(
             raise ValueError(f"output root is not a directory: {output_root}")
 
         groups, uniques = verify_move_groups(entries)
-        progress.manifest_group_stats(len(groups), len(uniques))
+        uncategorized_groups, uncategorized_uniques = verify_move_uncategorized_groups(uncategorized_entries)
+        progress.manifest_group_stats(len(groups) + len(uncategorized_groups), len(uniques) + len(uncategorized_uniques))
         progress.start_phase(
             "manifest-verify-move",
-            verify_move_expected_check_count(groups, uniques, ignore_json_sidecar_fields),
+            verify_move_expected_check_count(
+                groups,
+                uniques,
+                ignore_json_sidecar_fields,
+            ) + verify_move_uncategorized_expected_check_count(uncategorized_groups, uncategorized_uniques),
         )
-        actual_log_path.parent.mkdir(parents=True, exist_ok=True)
-        with actual_log_path.open("w", newline="", encoding="utf-8") as file:
+        prepare_new_output_path(actual_log_path, "verify-move log")
+        with actual_log_path.open("x", newline="", encoding="utf-8") as file:
             logger = CsvLogger(file, mode="verify_move", hash_field="xxh128")
             for unique in sorted(uniques, key=verify_move_sort_key):
                 for path, size_bytes, digest, file_role in verify_move_entry_source_checks(unique):
@@ -192,6 +219,25 @@ def verify_move(
                     else:
                         failed_paths += 1
                     progress.manifest_path_checked(matched)
+
+            for unique in sorted(uncategorized_uniques, key=verify_move_uncategorized_sort_key):
+                matched = verify_move_log_source_intact(
+                    logger,
+                    entry=unique,
+                    path=unique.nas_path,
+                    size_bytes=unique.size_bytes,
+                    digest=unique.xxh128,
+                    file_role="uncategorized",
+                    disposition="verify_move_unique_uncategorized_intact",
+                    event="verify_move_unique_uncategorized",
+                    reason="unique_source_intact",
+                )
+                checked_paths += 1
+                if matched:
+                    matched_paths += 1
+                else:
+                    failed_paths += 1
+                progress.manifest_path_checked(matched)
 
             for index, group in enumerate(groups, start=1):
                 group_id = f"m{index:06d}"
@@ -350,6 +396,68 @@ def verify_move(
                             failed_paths += 1
                         progress.manifest_path_checked(matched)
 
+            for index, group in enumerate(uncategorized_groups, start=1):
+                group_id = f"u{index:06d}"
+                keeper = verify_move_choose_uncategorized_keeper(group)
+                matched = verify_move_log_source_intact(
+                    logger,
+                    entry=keeper,
+                    path=keeper.nas_path,
+                    size_bytes=keeper.size_bytes,
+                    digest=keeper.xxh128,
+                    file_role="uncategorized",
+                    disposition="verify_move_matched",
+                    event="verify_move_uncategorized_keeper",
+                    reason="keeper_source_intact",
+                    group_id=group_id,
+                    keeper_path=keeper.nas_path,
+                )
+                checked_paths += 1
+                if matched:
+                    matched_paths += 1
+                else:
+                    failed_paths += 1
+                progress.manifest_path_checked(matched)
+
+                for duplicate in sorted(group, key=verify_move_uncategorized_sort_key):
+                    if duplicate == keeper:
+                        continue
+                    matched = verify_move_log_source_missing(
+                        logger,
+                        entry=duplicate,
+                        path=duplicate.nas_path,
+                        size_bytes=duplicate.size_bytes,
+                        digest=duplicate.xxh128,
+                        file_role="uncategorized",
+                        group_id=group_id,
+                        keeper_path=keeper.nas_path,
+                    )
+                    checked_paths += 1
+                    if matched:
+                        matched_paths += 1
+                    else:
+                        failed_paths += 1
+                    progress.manifest_path_checked(matched)
+
+                    destination = verify_move_destination_for(output_root, duplicate.nas_root_label, duplicate.relative_path)
+                    expected_destinations.add(destination)
+                    matched = verify_move_log_destination_present(
+                        logger,
+                        entry=duplicate,
+                        path=destination,
+                        size_bytes=duplicate.size_bytes,
+                        digest=duplicate.xxh128,
+                        file_role="uncategorized",
+                        group_id=group_id,
+                        keeper_path=keeper.nas_path,
+                    )
+                    checked_paths += 1
+                    if matched:
+                        matched_paths += 1
+                    else:
+                        failed_paths += 1
+                    progress.manifest_path_checked(matched)
+
             output_entries = sorted(output_root.rglob("*")) if output_root.is_dir() else []
             progress.start_phase("manifest-output-scan", len(output_entries))
             for path in verify_move_unexpected_outputs(output_entries, expected_destinations, actual_log_path, progress):
@@ -406,6 +514,23 @@ def verify_move_groups(entries: list[ManifestEntry]) -> tuple[list[list[Manifest
     return groups, uniques
 
 
+def verify_move_uncategorized_groups(
+    entries: list[ManifestInventoryRow],
+) -> tuple[list[list[ManifestInventoryRow]], list[ManifestInventoryRow]]:
+    buckets: dict[tuple[int, str], list[ManifestInventoryRow]] = defaultdict(list)
+    for entry in entries:
+        buckets[(entry.size_bytes, entry.xxh128)].append(entry)
+
+    groups: list[list[ManifestInventoryRow]] = []
+    uniques: list[ManifestInventoryRow] = []
+    for bucket in buckets.values():
+        if len(bucket) == 1:
+            uniques.extend(bucket)
+        else:
+            groups.append(bucket)
+    return groups, uniques
+
+
 def verify_move_expected_check_count(
     groups: list[list[ManifestEntry]],
     uniques: list[ManifestEntry],
@@ -432,6 +557,13 @@ def verify_move_expected_check_count(
                 if merge_needed[sidecar_key] > 0:
                     merge_needed[sidecar_key] -= 1
     return count
+
+
+def verify_move_uncategorized_expected_check_count(
+    groups: list[list[ManifestInventoryRow]],
+    uniques: list[ManifestInventoryRow],
+) -> int:
+    return len(uniques) + sum(1 + 2 * (len(group) - 1) for group in groups)
 
 
 def verify_move_sidecar_conflict(group: list[ManifestEntry], ignore_json_sidecar_fields: bool = False) -> bool:
@@ -568,6 +700,19 @@ def verify_move_keeper_key(entry: ManifestEntry) -> tuple[int, int, int, str, st
     )
 
 
+def verify_move_choose_uncategorized_keeper(group: list[ManifestInventoryRow]) -> ManifestInventoryRow:
+    return sorted(group, key=verify_move_uncategorized_keeper_key)[0]
+
+
+def verify_move_uncategorized_keeper_key(entry: ManifestInventoryRow) -> tuple[int, int, str, str]:
+    return (
+        verify_move_path_class(entry.nas_path),
+        verify_move_date_directory_score(entry.nas_path),
+        entry.nas_root_label.lower(),
+        entry.relative_path.as_posix().lower(),
+    )
+
+
 def verify_move_path_class(path: Path) -> int:
     if verify_move_has_takeout_segment(path):
         return 0
@@ -589,6 +734,10 @@ def verify_move_has_mobilebackup_segment(path: Path) -> bool:
 
 
 def verify_move_sort_key(entry: ManifestEntry) -> tuple[str, str]:
+    return entry.nas_root_label.lower(), entry.relative_path.as_posix().lower()
+
+
+def verify_move_uncategorized_sort_key(entry: ManifestInventoryRow) -> tuple[str, str]:
     return entry.nas_root_label.lower(), entry.relative_path.as_posix().lower()
 
 

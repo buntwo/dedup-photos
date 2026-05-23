@@ -41,6 +41,13 @@ def default_log_path() -> Path:
     return Path.cwd() / f"dedup_photos_{stamp}.csv"
 
 
+def prepare_new_output_path(path: Path, description: str) -> Path:
+    if path.exists():
+        raise ValueError(f"{description} already exists: {path}")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    return path
+
+
 def is_primary_image(path: Path) -> bool:
     return path.suffix.lower() in PRIMARY_IMAGE_EXTENSIONS
 

@@ -29,6 +29,27 @@ def test_verify_manifests_byte_checks_same_hash_groups(tmp_path: Path) -> None:
     assert rows(log_path)[0]["disposition"] == "verify_matched"
 
 
+def test_verify_manifests_refuses_existing_log_path(tmp_path: Path) -> None:
+    nas_root = tmp_path / "nas"
+    local_one = tmp_path / "one"
+    local_two = tmp_path / "two"
+    manifest_one = tmp_path / "one.csv"
+    manifest_two = tmp_path / "two.csv"
+    log_path = tmp_path / "verify.csv"
+    write(local_one / "a.jpg", b"same")
+    write(local_two / "b.jpg", b"same")
+    write(nas_root / "one" / "a.jpg", b"same")
+    write(nas_root / "two" / "b.jpg", b"same")
+    generate_manifest(local_one, nas_root / "one", manifest_one)
+    generate_manifest(local_two, nas_root / "two", manifest_two)
+    log_path.write_text("do not overwrite\n", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="verify log already exists"):
+        verify_manifests([manifest_one, manifest_two], log_path, byte_check=True)
+
+    assert log_path.read_text(encoding="utf-8") == "do not overwrite\n"
+
+
 def test_verify_manifests_byte_checks_same_hash_sidecar_groups(tmp_path: Path) -> None:
     nas_root = tmp_path / "nas"
     local_one = tmp_path / "one"
@@ -55,6 +76,30 @@ def test_verify_manifests_byte_checks_same_hash_sidecar_groups(tmp_path: Path) -
     assert {row["event"] for row in verify_rows} == {"verify_manifest_primary_group", "verify_manifest_sidecar_group"}
     sidecar = [row for row in verify_rows if row["file_role"] == "sidecar"][0]
     assert sidecar["disposition"] == "verify_matched"
+
+
+def test_verify_manifests_byte_checks_same_hash_uncategorized_groups(tmp_path: Path) -> None:
+    nas_root = tmp_path / "nas"
+    local_one = tmp_path / "one"
+    local_two = tmp_path / "two"
+    manifest_one = tmp_path / "one.csv"
+    manifest_two = tmp_path / "two.csv"
+    log_path = tmp_path / "verify.csv"
+    write(local_one / "clip.bin", b"same")
+    write(local_two / "clip.bin", b"same")
+    write(nas_root / "one" / "clip.bin", b"same")
+    write(nas_root / "two" / "clip.bin", b"same")
+    generate_manifest(local_one, nas_root / "one", manifest_one)
+    generate_manifest(local_two, nas_root / "two", manifest_two)
+
+    result = verify_manifests([manifest_one, manifest_two], log_path, byte_check=True)
+
+    assert result.checked_groups == 1
+    assert result.failed_groups == 0
+    verify_row = rows(log_path)[0]
+    assert verify_row["event"] == "verify_manifest_uncategorized_group"
+    assert verify_row["file_role"] == "uncategorized"
+    assert verify_row["disposition"] == "verify_matched"
 
 
 def test_verify_manifests_requires_byte_check_flag(tmp_path: Path) -> None:
@@ -121,6 +166,34 @@ def test_verify_manifests_byte_check_fails_same_hash_different_sidecar_bytes(tmp
     assert failure["reason"] == "same_manifest_hash_but_bytes_differ"
 
 
+def test_verify_manifests_byte_check_fails_same_hash_different_uncategorized_bytes(tmp_path: Path) -> None:
+    nas_root = tmp_path / "nas"
+    local_one = tmp_path / "one"
+    local_two = tmp_path / "two"
+    manifest_one = tmp_path / "one.csv"
+    manifest_two = tmp_path / "two.csv"
+    log_path = tmp_path / "verify.csv"
+    write(local_one / "clip.bin", b"aaaa")
+    write(local_two / "clip.bin", b"bbbb")
+    write(nas_root / "one" / "clip.bin", b"aaaa")
+    write(nas_root / "two" / "clip.bin", b"bbbb")
+    generate_manifest(local_one, nas_root / "one", manifest_one)
+    generate_manifest(local_two, nas_root / "two", manifest_two)
+    one_rows = rows(manifest_one)
+    two_rows = rows(manifest_two)
+    two_rows[0]["xxh128"] = one_rows[0]["xxh128"]
+    write_rows(manifest_two, two_rows)
+
+    result = verify_manifests([manifest_one, manifest_two], log_path, byte_check=True)
+
+    assert result.checked_groups == 1
+    assert result.failed_groups == 1
+    failure = [row for row in rows(log_path) if row["disposition"] == "verify_failed"][0]
+    assert failure["event"] == "verify_manifest_uncategorized"
+    assert failure["file_role"] == "uncategorized"
+    assert failure["reason"] == "same_manifest_hash_but_bytes_differ"
+
+
 def test_verify_move_passes_after_manifest_move(tmp_path: Path) -> None:
     case = make_move_case(tmp_path, with_sidecars=True)
     execute_plan(case.plan_path, tmp_path / "execute.csv", move=True)
@@ -146,6 +219,18 @@ def test_verify_move_fails_when_move_was_not_executed(tmp_path: Path) -> None:
         if row["disposition"] == "verify_move_failed"
     } == {"duplicate_source_still_exists", "expected_file_missing"}
 
+
+def test_verify_move_refuses_existing_log_path(tmp_path: Path) -> None:
+    case = make_move_case(tmp_path)
+    log_path = tmp_path / "verify_move.csv"
+    log_path.write_text("do not overwrite\n", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="verify-move log already exists"):
+        verify_move(case.manifests, case.output_root, log_path)
+
+    assert log_path.read_text(encoding="utf-8") == "do not overwrite\n"
+
+
 def test_verify_move_fails_when_keeper_is_missing(tmp_path: Path) -> None:
     case = make_move_case(tmp_path)
     execute_plan(case.plan_path, tmp_path / "execute.csv", move=True)
@@ -169,6 +254,34 @@ def test_verify_move_fails_when_destination_size_mismatches(tmp_path: Path) -> N
     failure = [row for row in rows(log_path) if row["disposition"] == "verify_move_failed"][0]
     assert failure["event"] == "verify_move_duplicate_destination"
     assert failure["reason"] == "expected_file_size_mismatch"
+
+
+def test_verify_move_checks_uncategorized_duplicates(tmp_path: Path) -> None:
+    nas_one = tmp_path / "nas-one"
+    nas_two = tmp_path / "nas-two"
+    output_root = tmp_path / "dupes"
+    manifest_one = tmp_path / "one.csv"
+    manifest_two = tmp_path / "two.csv"
+    plan_path = tmp_path / "plan.csv"
+    write(nas_one / "clip.bin", b"same standalone")
+    write(nas_two / "clip.bin", b"same standalone")
+    write(nas_one / "unique.bin", b"unique")
+    generate_manifest(nas_one, nas_one, manifest_one)
+    generate_manifest(nas_two, nas_two, manifest_two)
+    plan_from_manifests([manifest_one, manifest_two], output_root, plan_path)
+    execute_plan(plan_path, tmp_path / "execute.csv", move=True)
+    log_path = tmp_path / "verify_move.csv"
+
+    result = verify_move([manifest_one, manifest_two], output_root, log_path)
+
+    verify_rows = rows(log_path)
+    assert result.failed_paths == 0
+    assert result.unexpected_outputs == 0
+    assert [row for row in verify_rows if row["event"] == "verify_move_unique_uncategorized"]
+    assert [row for row in verify_rows if row["event"] == "verify_move_uncategorized_keeper"]
+    destination = [row for row in verify_rows if row["file_role"] == "uncategorized" and row["destination_path"]][0]
+    assert destination["destination_path"] == str(output_root / "nas-two" / "clip.bin")
+
 
 def test_verify_move_catches_unique_file_moved_to_output(tmp_path: Path) -> None:
     nas_one = tmp_path / "nas-one"
