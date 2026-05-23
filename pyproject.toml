@@ -13,7 +13,7 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project.scripts]
-dedup-photos-manifest = "dedup_photos.cli:manifest_main"
+dedup-photos = "dedup_photos.cli:manifest_main"
 
 [tool.pytest.ini_options]
 pythonpath = ["."]

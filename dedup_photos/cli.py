@@ -13,14 +13,14 @@ def build_manifest_parser() -> argparse.ArgumentParser:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=(
             "Typical workflow:\n"
-            "  dedup-photos-manifest manifest /local/project/google_photos \\\n"
+            "  dedup-photos manifest /local/project/google_photos \\\n"
             "    --nas-root /my/nas/google_photos\n"
-            "  dedup-photos-manifest plan /local/project/google_photos.manifest.csv phone.manifest.csv \\\n"
+            "  dedup-photos plan /local/project/google_photos.manifest.csv phone.manifest.csv \\\n"
             "    --output /my/nas/dupes --log move_plan.csv\n"
-            "  dedup-photos-manifest verify-bytes /local/project/google_photos.manifest.csv phone.manifest.csv \\\n"
+            "  dedup-photos verify-bytes /local/project/google_photos.manifest.csv phone.manifest.csv \\\n"
             "    --log byte_verify.csv\n"
-            "  dedup-photos-manifest execute-plan move_plan.csv --move --log execute.csv\n"
-            "  dedup-photos-manifest verify-move /local/project/google_photos.manifest.csv phone.manifest.csv \\\n"
+            "  dedup-photos execute-plan move_plan.csv --move --log execute.csv\n"
+            "  dedup-photos verify-move /local/project/google_photos.manifest.csv phone.manifest.csv \\\n"
             "    --output /my/nas/dupes --log move_verify.csv"
         ),
     )
@@ -41,7 +41,7 @@ def build_manifest_parser() -> argparse.ArgumentParser:
             "Example:\n"
             "  copied NAS tree: /my/nas/google_photos\n"
             "  local copy:      /local/project/google_photos\n"
-            "  command:         dedup-photos-manifest manifest /local/project/google_photos \\\n"
+            "  command:         dedup-photos manifest /local/project/google_photos \\\n"
             "                     --nas-root /my/nas/google_photos\n\n"
             "Default manifest path: /local/project/google_photos.manifest.csv\n"
             "The manifest command refuses to overwrite an existing manifest file.\n"
@@ -75,7 +75,7 @@ def build_manifest_parser() -> argparse.ArgumentParser:
             "--output / nas_root_label / relative_path, where nas_root_label is the basename\n"
             "of the --nas-root used when creating each manifest.\n\n"
             "Example:\n"
-            "  dedup-photos-manifest plan google_photos.manifest.csv phone.manifest.csv \\\n"
+            "  dedup-photos plan google_photos.manifest.csv phone.manifest.csv \\\n"
             "    --output /my/nas/dupes \\\n"
             "    --log move_plan.csv"
         ),
@@ -89,10 +89,10 @@ def build_manifest_parser() -> argparse.ArgumentParser:
         help="Byte-check duplicate groups referenced by manifests.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=(
-            "This rereads only NAS files that are in same-size/same-hash manifest groups.\n"
+            "This rereads NAS primary and sidecar files that are in same-size/same-hash manifest groups.\n"
             "Run it before execute-plan --move.\n\n"
             "Example:\n"
-            "  dedup-photos-manifest verify-bytes google_photos.manifest.csv phone.manifest.csv --log byte_verify.csv"
+            "  dedup-photos verify-bytes google_photos.manifest.csv phone.manifest.csv --log byte_verify.csv"
         ),
     )
     verify.add_argument("manifests", nargs="+", type=Path, help="Manifest CSVs to verify against NAS files.")
@@ -106,9 +106,9 @@ def build_manifest_parser() -> argparse.ArgumentParser:
             "Default is a dry run: the plan is validated and logged, but no files move.\n"
             "Add --move to move duplicate primaries and their sidecars.\n\n"
             "Examples:\n"
-            "  dedup-photos-manifest execute-plan move_plan.csv --log execute_dry_run.csv\n"
-            "  dedup-photos-manifest execute-plan move_plan.csv --move --log execute.csv\n"
-            "  dedup-photos-manifest execute-plan move_plan.csv --move --verify-source-hashes --log execute.csv"
+            "  dedup-photos execute-plan move_plan.csv --log execute_dry_run.csv\n"
+            "  dedup-photos execute-plan move_plan.csv --move --log execute.csv\n"
+            "  dedup-photos execute-plan move_plan.csv --move --verify-source-hashes --log execute.csv"
         ),
     )
     execute.add_argument("plan", type=Path, help="Move-plan CSV created by the plan subcommand.")
@@ -128,7 +128,7 @@ def build_manifest_parser() -> argparse.ArgumentParser:
             "Use the same manifests and --output root that were used for plan.\n"
             "This checks paths and sizes only; byte identity should be checked first with verify-bytes.\n\n"
             "Example:\n"
-            "  dedup-photos-manifest verify-move google_photos.manifest.csv phone.manifest.csv \\\n"
+            "  dedup-photos verify-move google_photos.manifest.csv phone.manifest.csv \\\n"
             "    --output /my/nas/dupes \\\n"
             "    --log move_verify.csv"
         ),

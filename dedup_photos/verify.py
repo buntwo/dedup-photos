@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 from collections import defaultdict
+from dataclasses import dataclass
 from pathlib import Path
 
 from dedup_photos.common import CsvLogger, default_log_path
@@ -12,6 +13,15 @@ from dedup_photos.progress import Progress
 
 
 VERIFY_MOVE_DATE_DIRECTORY_TOKEN_RE = re.compile(r"(?<!\d)(?:\d{4}-\d{2}-\d{2}|\d{8}|\d{4})(?!\d)")
+
+
+@dataclass(frozen=True)
+class ByteCheckItem:
+    path: Path
+    size_bytes: int
+    digest: str
+    input_root: str
+    file_role: str
 
 
 def verify_manifests(
@@ -26,49 +36,58 @@ def verify_manifests(
     try:
         progress.start_phase("manifest-load", len(manifest_paths))
         entries = load_manifests(manifest_paths, progress)
-        groups, uniques = manifest_duplicate_groups(entries)
-        progress.manifest_group_stats(len(groups), len(uniques))
-        progress.start_phase("manifest-verify-bytes", len(groups))
+        primary_groups, uniques = manifest_duplicate_groups(entries)
+        sidecar_groups = manifest_sidecar_duplicate_groups(entries)
+        byte_check_groups = [
+            ("primary", f"m{index:06d}", manifest_entry_byte_check_items(group))
+            for index, group in enumerate(primary_groups, start=1)
+        ]
+        byte_check_groups.extend(
+            ("sidecar", f"s{index:06d}", group)
+            for index, group in enumerate(sidecar_groups, start=1)
+        )
+        progress.manifest_group_stats(len(byte_check_groups), len(uniques))
+        progress.start_phase("manifest-verify-bytes", len(byte_check_groups))
         actual_log_path = log_path or default_log_path()
         failed_groups = 0
 
         actual_log_path.parent.mkdir(parents=True, exist_ok=True)
         with actual_log_path.open("w", newline="", encoding="utf-8") as file:
             logger = CsvLogger(file, mode="manifest_verify", hash_field="xxh128")
-            for index, group in enumerate(groups, start=1):
-                group_id = f"m{index:06d}"
-                failures = byte_check_manifest_group(group, progress)
+            for file_role, group_id, group in byte_check_groups:
+                failures = byte_check_item_group(group, progress)
                 failed = bool(failures)
                 if failed:
                     failed_groups += 1
-                    for entry in failures:
+                    for item in failures:
                         logger.row(
                             disposition="verify_failed",
-                            event="verify_manifest_primary",
+                            event=f"verify_manifest_{file_role}",
                             status="error",
                             group_id=group_id,
-                            file_role="primary",
-                            input_root=entry.nas_root_label,
-                            source_path=entry.nas_path,
-                            size_bytes=entry.size_bytes,
-                            digest=entry.xxh128,
+                            file_role=file_role,
+                            input_root=item.input_root,
+                            source_path=item.path,
+                            size_bytes=item.size_bytes,
+                            digest=item.digest,
                             reason="same_manifest_hash_but_bytes_differ",
                         )
                 else:
                     logger.row(
                         disposition="verify_matched",
-                        event="verify_manifest_group",
+                        event=f"verify_manifest_{file_role}_group",
                         status="kept",
                         group_id=group_id,
+                        file_role=file_role,
                         size_bytes=group[0].size_bytes,
-                        digest=group[0].xxh128,
+                        digest=group[0].digest,
                         reason="all_manifest_hash_matches_are_byte_equal",
                     )
                 progress.manifest_group_checked(failed)
 
         return ManifestVerifyResult(
             log_path=actual_log_path,
-            checked_groups=len(groups),
+            checked_groups=len(byte_check_groups),
             failed_groups=failed_groups,
         )
     finally:
@@ -82,6 +101,44 @@ def byte_check_manifest_group(group: list[ManifestEntry], progress: Progress | N
         if not files_equal_by_path(reference.nas_path, entry.nas_path, progress):
             failures.append(entry)
     return failures
+
+
+def byte_check_item_group(group: list[ByteCheckItem], progress: Progress | None = None) -> list[ByteCheckItem]:
+    reference = group[0]
+    failures: list[ByteCheckItem] = []
+    for item in group[1:]:
+        if not files_equal_by_path(reference.path, item.path, progress):
+            failures.append(item)
+    return failures
+
+
+def manifest_entry_byte_check_items(group: list[ManifestEntry]) -> list[ByteCheckItem]:
+    return [
+        ByteCheckItem(
+            path=entry.nas_path,
+            size_bytes=entry.size_bytes,
+            digest=entry.xxh128,
+            input_root=entry.nas_root_label,
+            file_role="primary",
+        )
+        for entry in group
+    ]
+
+
+def manifest_sidecar_duplicate_groups(entries: list[ManifestEntry]) -> list[list[ByteCheckItem]]:
+    buckets: dict[tuple[int, str], list[ByteCheckItem]] = defaultdict(list)
+    for entry in entries:
+        for path, size_bytes, digest in zip(entry.sidecar_paths, entry.sidecar_sizes, entry.sidecar_xxh128s, strict=True):
+            buckets[(size_bytes, digest)].append(
+                ByteCheckItem(
+                    path=path,
+                    size_bytes=size_bytes,
+                    digest=digest,
+                    input_root=entry.nas_root_label,
+                    file_role="sidecar",
+                )
+            )
+    return [bucket for bucket in buckets.values() if len(bucket) > 1]
 
 
 def verify_move(

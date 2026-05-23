@@ -31,6 +31,35 @@ def test_verify_manifests_byte_checks_same_hash_groups(tmp_path: Path) -> None:
     assert result.failed_groups == 0
     assert rows(log_path)[0]["disposition"] == "verify_matched"
 
+
+def test_verify_manifests_byte_checks_same_hash_sidecar_groups(tmp_path: Path) -> None:
+    nas_root = tmp_path / "nas"
+    local_one = tmp_path / "one"
+    local_two = tmp_path / "two"
+    manifest_one = tmp_path / "one.csv"
+    manifest_two = tmp_path / "two.csv"
+    log_path = tmp_path / "verify.csv"
+    write(local_one / "a.jpg", b"same")
+    write(local_one / "a.mov", b"live")
+    write(local_two / "b.jpg", b"same")
+    write(local_two / "b.mp4", b"live")
+    write(nas_root / "one" / "a.jpg", b"same")
+    write(nas_root / "one" / "a.mov", b"live")
+    write(nas_root / "two" / "b.jpg", b"same")
+    write(nas_root / "two" / "b.mp4", b"live")
+    generate_manifest(local_one, nas_root / "one", manifest_one)
+    generate_manifest(local_two, nas_root / "two", manifest_two)
+
+    result = verify_manifests([manifest_one, manifest_two], log_path, byte_check=True)
+
+    assert result.checked_groups == 2
+    assert result.failed_groups == 0
+    verify_rows = rows(log_path)
+    assert {row["event"] for row in verify_rows} == {"verify_manifest_primary_group", "verify_manifest_sidecar_group"}
+    sidecar = [row for row in verify_rows if row["file_role"] == "sidecar"][0]
+    assert sidecar["disposition"] == "verify_matched"
+
+
 def test_verify_manifests_requires_byte_check_flag(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="byte_check=True"):
         verify_manifests([], tmp_path / "verify.csv", byte_check=False)
@@ -59,6 +88,41 @@ def test_verify_manifests_byte_check_fails_same_hash_different_bytes(tmp_path: P
     assert result.failed_groups == 1
     failure = [row for row in rows(log_path) if row["disposition"] == "verify_failed"][0]
     assert failure["reason"] == "same_manifest_hash_but_bytes_differ"
+
+
+def test_verify_manifests_byte_check_fails_same_hash_different_sidecar_bytes(tmp_path: Path) -> None:
+    nas_root = tmp_path / "nas"
+    local_one = tmp_path / "one"
+    local_two = tmp_path / "two"
+    manifest_one = tmp_path / "one.csv"
+    manifest_two = tmp_path / "two.csv"
+    log_path = tmp_path / "verify.csv"
+    write(local_one / "a.jpg", b"same")
+    write(local_one / "a.mov", b"aaaa")
+    write(local_two / "b.jpg", b"same")
+    write(local_two / "b.mp4", b"bbbb")
+    write(nas_root / "one" / "a.jpg", b"same")
+    write(nas_root / "one" / "a.mov", b"aaaa")
+    write(nas_root / "two" / "b.jpg", b"same")
+    write(nas_root / "two" / "b.mp4", b"bbbb")
+    generate_manifest(local_one, nas_root / "one", manifest_one)
+    generate_manifest(local_two, nas_root / "two", manifest_two)
+    one_rows = rows(manifest_one)
+    two_rows = rows(manifest_two)
+    one_sidecar = [row for row in one_rows if row["file_role"] == "sidecar"][0]
+    two_sidecar = [row for row in two_rows if row["file_role"] == "sidecar"][0]
+    two_sidecar["xxh128"] = one_sidecar["xxh128"]
+    write_rows(manifest_two, two_rows)
+
+    result = verify_manifests([manifest_one, manifest_two], log_path, byte_check=True)
+
+    assert result.checked_groups == 2
+    assert result.failed_groups == 1
+    failure = [row for row in rows(log_path) if row["disposition"] == "verify_failed"][0]
+    assert failure["event"] == "verify_manifest_sidecar"
+    assert failure["file_role"] == "sidecar"
+    assert failure["reason"] == "same_manifest_hash_but_bytes_differ"
+
 
 def test_verify_move_passes_after_manifest_move(tmp_path: Path) -> None:
     manifests, plan_path, _nas_one, _nas_two, output_root = make_manifest_move_case(tmp_path, with_sidecars=True)
