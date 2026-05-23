@@ -363,15 +363,22 @@ def verify_move_choose_keeper(group: list[ManifestEntry]) -> ManifestEntry:
     return sorted(group, key=verify_move_keeper_key)[0]
 
 
-def verify_move_keeper_key(entry: ManifestEntry) -> tuple[int, int, int, int, str, str]:
+def verify_move_keeper_key(entry: ManifestEntry) -> tuple[int, int, int, str, str]:
     return (
         0 if entry.sidecar_paths else 1,
+        verify_move_path_class(entry.nas_path),
         verify_move_date_directory_score(entry.nas_path),
-        0 if verify_move_has_takeout_segment(entry.nas_path) else 1,
-        1 if verify_move_has_mobilebackup_segment(entry.nas_path) else 0,
         entry.nas_root_label.lower(),
         entry.relative_path.as_posix().lower(),
     )
+
+
+def verify_move_path_class(path: Path) -> int:
+    if verify_move_has_takeout_segment(path):
+        return 0
+    if verify_move_has_mobilebackup_segment(path):
+        return 2
+    return 1
 
 
 def verify_move_date_directory_score(path: Path) -> int:

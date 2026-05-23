@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+from dataclasses import dataclass
 from pathlib import Path
 
 from dedup_photos.manifest import MANIFEST_FIELDS, generate_manifest, plan_from_manifests
@@ -40,12 +41,21 @@ def prepare_nas_root(local_root: Path, nas_parent: Path) -> Path:
     return nas_root
 
 
-def make_move_plan(
+@dataclass(frozen=True)
+class MoveCase:
+    manifests: list[Path]
+    plan_path: Path
+    nas_one: Path
+    nas_two: Path
+    output_root: Path
+
+
+def make_move_case(
     tmp_path: Path,
     *,
     with_sidecars: bool = False,
     full_primary_prefix_sidecar: bool = False,
-) -> tuple[Path, Path, Path, Path]:
+) -> MoveCase:
     nas_one = tmp_path / "nas-one"
     nas_two = tmp_path / "nas-two"
     output_root = tmp_path / "dupes"
@@ -61,43 +71,7 @@ def make_move_plan(
     generate_manifest(nas_one, nas_one, manifest_one)
     generate_manifest(nas_two, nas_two, manifest_two)
     plan_from_manifests([manifest_one, manifest_two], output_root, plan_path)
-    return plan_path, nas_one, nas_two, output_root
-
-
-def make_manifest_move_case(
-    tmp_path: Path,
-    *,
-    with_sidecars: bool = False,
-) -> tuple[list[Path], Path, Path, Path, Path]:
-    nas_one = tmp_path / "nas-one"
-    nas_two = tmp_path / "nas-two"
-    output_root = tmp_path / "dupes"
-    manifest_one = tmp_path / "one.csv"
-    manifest_two = tmp_path / "two.csv"
-    plan_path = tmp_path / "plan.csv"
-    write(nas_one / "photo.jpg", b"same")
-    write(nas_two / "photo.jpg", b"same")
-    if with_sidecars:
-        write(nas_one / "photo.mov", b"live")
-        write(nas_two / "photo.mov", b"live")
-    generate_manifest(nas_one, nas_one, manifest_one)
-    generate_manifest(nas_two, nas_two, manifest_two)
-    plan_from_manifests([manifest_one, manifest_two], output_root, plan_path)
-    return [manifest_one, manifest_two], plan_path, nas_one, nas_two, output_root
-
-
-def make_conflict_manifests(tmp_path: Path) -> tuple[list[Path], Path, Path, Path]:
-    nas_one = tmp_path / "nas-one"
-    nas_two = tmp_path / "nas-two"
-    manifest_one = tmp_path / "one.csv"
-    manifest_two = tmp_path / "two.csv"
-    write(nas_one / "photo.jpg", b"same")
-    write(nas_one / "photo.json", b"left")
-    write(nas_two / "photo.jpg", b"same")
-    write(nas_two / "photo.json", b"right")
-    generate_manifest(nas_one, nas_one, manifest_one)
-    generate_manifest(nas_two, nas_two, manifest_two)
-    return [manifest_one, manifest_two], nas_one, nas_two, tmp_path / "dupes"
+    return MoveCase([manifest_one, manifest_two], plan_path, nas_one, nas_two, output_root)
 
 
 def make_conflict_manifests(tmp_path: Path) -> tuple[list[Path], Path, Path, Path]:

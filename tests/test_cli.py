@@ -6,9 +6,7 @@ from pathlib import Path
 import pytest
 
 from dedup_photos.cli import default_manifest_output_path, manifest_main
-from dedup_photos.constants import MANIFEST_VERSION
-from dedup_photos.manifest import MANIFEST_FIELDS, execute_plan, generate_manifest, plan_from_manifests, verify_manifests, verify_move
-from tests.helpers import make_conflict_manifests, make_manifest_move_case, make_move_plan, prepare_nas_root, rows, write, write_csv, write_rows
+from tests.helpers import make_move_case, prepare_nas_root, rows, write
 
 
 def test_manifest_cli_refuses_existing_default_manifest_path(tmp_path: Path) -> None:
@@ -138,23 +136,25 @@ def test_execute_plan_help_lists_hash_verification_opt_out(capsys: pytest.Captur
     assert "--verify-source-hashes" not in help_text
 
 def test_verify_move_cli_returns_nonzero_on_failure(tmp_path: Path) -> None:
-    manifests, _plan_path, _nas_one, _nas_two, output_root = make_manifest_move_case(tmp_path)
+    case = make_move_case(tmp_path)
     log_path = tmp_path / "verify_move.csv"
 
-    assert manifest_main(["verify-move", *[str(path) for path in manifests], "--output", str(output_root), "--log", str(log_path)]) == 1
+    assert manifest_main(
+        ["verify-move", *[str(path) for path in case.manifests], "--output", str(case.output_root), "--log", str(log_path)]
+    ) == 1
     assert [row for row in rows(log_path) if row["disposition"] == "verify_move_failed"]
 
 def test_execute_plan_cli_dry_run_and_move(tmp_path: Path) -> None:
-    plan_path, _nas_one, nas_two, output_root = make_move_plan(tmp_path)
+    case = make_move_case(tmp_path)
     dry_log = tmp_path / "dry.csv"
     move_log = tmp_path / "move.csv"
 
-    assert manifest_main(["execute-plan", str(plan_path), "--log", str(dry_log)]) == 0
-    assert (nas_two / "photo.jpg").exists()
-    assert manifest_main(["execute-plan", str(plan_path), "--log", str(move_log), "--move"]) == 0
+    assert manifest_main(["execute-plan", str(case.plan_path), "--log", str(dry_log)]) == 0
+    assert (case.nas_two / "photo.jpg").exists()
+    assert manifest_main(["execute-plan", str(case.plan_path), "--log", str(move_log), "--move"]) == 0
 
-    assert not (nas_two / "photo.jpg").exists()
-    assert (output_root / "nas-two" / "photo.jpg").exists()
+    assert not (case.nas_two / "photo.jpg").exists()
+    assert (case.output_root / "nas-two" / "photo.jpg").exists()
     dry_duplicate = [row for row in rows(dry_log) if row["file_role"] == "primary"][0]
     move_duplicate = [row for row in rows(move_log) if row["file_role"] == "primary"][0]
     assert rows(dry_log)[0]["disposition"] == "verified_keeper"
@@ -162,27 +162,29 @@ def test_execute_plan_cli_dry_run_and_move(tmp_path: Path) -> None:
     assert move_duplicate["disposition"] == "moved_duplicate_primary"
 
 def test_execute_plan_cli_move_verifies_source_hashes_by_default(tmp_path: Path) -> None:
-    plan_path, _nas_one, nas_two, output_root = make_move_plan(tmp_path)
-    (nas_two / "photo.jpg").write_bytes(b"diff")
+    case = make_move_case(tmp_path)
+    (case.nas_two / "photo.jpg").write_bytes(b"diff")
     log_path = tmp_path / "execute.csv"
 
-    assert manifest_main(["execute-plan", str(plan_path), "--move", "--log", str(log_path)]) == 1
+    assert manifest_main(["execute-plan", str(case.plan_path), "--move", "--log", str(log_path)]) == 1
 
-    assert (nas_two / "photo.jpg").exists()
-    assert not (output_root / "nas-two" / "photo.jpg").exists()
+    assert (case.nas_two / "photo.jpg").exists()
+    assert not (case.output_root / "nas-two" / "photo.jpg").exists()
     failure = [row for row in rows(log_path) if row["file_role"] == "primary"][0]
     assert failure["reason"] == "source_hash_mismatch"
     assert failure["hash_check"] == "mismatched"
 
 def test_execute_plan_cli_hash_verification_can_be_opted_out(tmp_path: Path) -> None:
-    plan_path, _nas_one, nas_two, output_root = make_move_plan(tmp_path)
-    (nas_two / "photo.jpg").write_bytes(b"diff")
+    case = make_move_case(tmp_path)
+    (case.nas_two / "photo.jpg").write_bytes(b"diff")
     log_path = tmp_path / "execute.csv"
 
-    assert manifest_main(["execute-plan", str(plan_path), "--move", "--no-verify-source-hashes", "--log", str(log_path)]) == 0
+    assert manifest_main(
+        ["execute-plan", str(case.plan_path), "--move", "--no-verify-source-hashes", "--log", str(log_path)]
+    ) == 0
 
-    assert not (nas_two / "photo.jpg").exists()
-    assert (output_root / "nas-two" / "photo.jpg").read_bytes() == b"diff"
+    assert not (case.nas_two / "photo.jpg").exists()
+    assert (case.output_root / "nas-two" / "photo.jpg").read_bytes() == b"diff"
     moved = [row for row in rows(log_path) if row["file_role"] == "primary"][0]
     assert moved["disposition"] == "moved_duplicate_primary"
     assert moved["hash_check"] == "not_checked"

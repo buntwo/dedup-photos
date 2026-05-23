@@ -5,10 +5,30 @@ from pathlib import Path
 
 import pytest
 
-from dedup_photos.cli import default_manifest_output_path, manifest_main
 from dedup_photos.constants import MANIFEST_VERSION
-from dedup_photos.manifest import MANIFEST_FIELDS, execute_plan, generate_manifest, plan_from_manifests, verify_manifests, verify_move
-from tests.helpers import make_conflict_manifests, make_manifest_move_case, make_move_plan, prepare_nas_root, rows, write, write_csv, write_rows
+from dedup_photos.manifest import MANIFEST_FIELDS, generate_manifest, plan_from_manifests
+from tests.helpers import prepare_nas_root, rows, write, write_rows
+
+
+def valid_manifest_row(**overrides: str) -> dict[str, str]:
+    row = {field: "" for field in MANIFEST_FIELDS}
+    row.update(
+        {
+            "manifest_version": MANIFEST_VERSION,
+            "batch_root": "/local",
+            "nas_root": "/nas",
+            "nas_root_label": "nas",
+            "group_id": "f000001",
+            "file_role": "primary",
+            "status": "included",
+            "nas_path": "/nas/photo.jpg",
+            "relative_path": "photo.jpg",
+            "size_bytes": "1",
+            "xxh128": "abc",
+        }
+    )
+    row.update(overrides)
+    return row
 
 
 def test_generate_manifest_stores_nas_paths_and_sidecars(tmp_path: Path) -> None:
@@ -153,6 +173,29 @@ def test_generate_manifest_writes_uncategorized_files_in_directory_sort_order(tm
         "2024/d.jpg",
     ]
 
+
+def test_generate_manifest_skips_symlinks_and_counts_regular_files(tmp_path: Path) -> None:
+    local_root = tmp_path / "google_photos"
+    nas_root = tmp_path / "nas" / "google_photos"
+    manifest_path = tmp_path / "manifest.csv"
+    write(local_root / "photo.jpg", b"image")
+    target_file = write(tmp_path / "outside.jpg", b"outside")
+    target_dir = tmp_path / "outside_dir"
+    write(target_dir / "linked.jpg", b"linked")
+    prepare_nas_root(local_root, tmp_path / "nas")
+    try:
+        (local_root / "linked-file.jpg").symlink_to(target_file)
+        (local_root / "linked-dir").symlink_to(target_dir, target_is_directory=True)
+    except OSError as error:
+        pytest.skip(f"symlinks are not available: {error}")
+
+    generate_manifest(local_root, nas_root, manifest_path)
+
+    manifest_rows = rows(manifest_path)
+    assert len(manifest_rows) == 1
+    assert manifest_rows[0]["relative_path"] == "photo.jpg"
+
+
 def test_generate_manifest_refuses_existing_manifest_path(tmp_path: Path) -> None:
     local_root = tmp_path / "google_photos"
     nas_root = tmp_path / "nas" / "google_photos"
@@ -224,57 +267,79 @@ def test_load_manifest_rejects_missing_fields(tmp_path: Path) -> None:
 
 def test_load_manifest_rejects_unsupported_version(tmp_path: Path) -> None:
     manifest_path = tmp_path / "bad.csv"
-    row = {
-        field: ""
-        for field in MANIFEST_FIELDS
-    }
-    row.update(
-        {
-            "manifest_version": "999",
-            "batch_root": "/local",
-            "nas_root": "/nas",
-            "nas_root_label": "nas",
-            "group_id": "f000001",
-            "file_role": "primary",
-            "status": "included",
-            "nas_path": "/nas/photo.jpg",
-            "relative_path": "photo.jpg",
-            "size_bytes": "1",
-            "xxh128": "abc",
-        }
-    )
-    write_rows(manifest_path, [row])
+    write_rows(manifest_path, [valid_manifest_row(manifest_version="999")])
 
     with pytest.raises(ValueError, match="unsupported manifest version"):
         plan_from_manifests([manifest_path], Path("/dupes"), tmp_path / "plan.csv")
 
 def test_load_manifest_rejects_sidecar_without_primary(tmp_path: Path) -> None:
     manifest_path = tmp_path / "bad.csv"
-    row = {
-        field: ""
-        for field in MANIFEST_FIELDS
-    }
-    row.update(
-        {
-            "manifest_version": MANIFEST_VERSION,
-            "batch_root": "/local",
-            "nas_root": "/nas",
-            "nas_root_label": "nas",
-            "group_id": "f000001",
-            "file_role": "sidecar",
-            "status": "included",
-            "nas_path": "/nas/photo.mov",
-            "relative_path": "photo.mov",
-            "primary_nas_path": "/nas/photo.jpg",
-            "primary_relative_path": "photo.jpg",
-            "size_bytes": "1",
-            "xxh128": "abc",
-        }
+    write_rows(
+        manifest_path,
+        [
+            valid_manifest_row(
+                file_role="sidecar",
+                nas_path="/nas/photo.mov",
+                relative_path="photo.mov",
+                primary_nas_path="/nas/photo.jpg",
+                primary_relative_path="photo.jpg",
+            )
+        ],
     )
-    write_rows(manifest_path, [row])
 
     with pytest.raises(ValueError, match="no primary"):
         plan_from_manifests([manifest_path], Path("/dupes"), tmp_path / "plan.csv")
+
+
+@pytest.mark.parametrize(
+    ("manifest_rows", "message"),
+    [
+        (
+            [
+                valid_manifest_row(),
+                valid_manifest_row(nas_path="/nas/other.jpg", relative_path="other.jpg", xxh128="def"),
+            ],
+            "multiple primary rows",
+        ),
+        ([valid_manifest_row(file_role="unknown")], "unsupported manifest file_role"),
+        ([valid_manifest_row(status="unknown")], "unsupported manifest status"),
+        ([valid_manifest_row(size_bytes="not-an-int")], "invalid manifest size_bytes"),
+        (
+            [
+                valid_manifest_row(
+                    file_role="sidecar",
+                    nas_path="/nas/photo.mov",
+                    relative_path="photo.mov",
+                )
+            ],
+            "sidecar manifest row missing primary path fields",
+        ),
+        (
+            [
+                valid_manifest_row(),
+                valid_manifest_row(
+                    file_role="sidecar",
+                    nas_path="/nas/photo.mov",
+                    relative_path="photo.mov",
+                    primary_nas_path="/nas/other.jpg",
+                    primary_relative_path="other.jpg",
+                ),
+            ],
+            "sidecar manifest row points at a different primary",
+        ),
+    ],
+)
+def test_load_manifest_rejects_malformed_rows(
+    tmp_path: Path,
+    manifest_rows: list[dict[str, str]],
+    message: str,
+) -> None:
+    manifest_path = tmp_path / "bad.csv"
+    write_rows(manifest_path, manifest_rows)
+
+    with pytest.raises(ValueError, match=message):
+        plan_from_manifests([manifest_path], Path("/dupes"), tmp_path / "plan.csv")
+
 
 def test_empty_manifest_writes_empty_plan(tmp_path: Path) -> None:
     manifest_path = tmp_path / "empty.csv"

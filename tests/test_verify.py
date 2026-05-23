@@ -1,14 +1,11 @@
 from __future__ import annotations
 
-import csv
 from pathlib import Path
 
 import pytest
 
-from dedup_photos.cli import default_manifest_output_path, manifest_main
-from dedup_photos.constants import MANIFEST_VERSION
-from dedup_photos.manifest import MANIFEST_FIELDS, execute_plan, generate_manifest, plan_from_manifests, verify_manifests, verify_move
-from tests.helpers import make_conflict_manifests, make_manifest_move_case, make_move_plan, prepare_nas_root, rows, write, write_csv, write_rows
+from dedup_photos.manifest import execute_plan, generate_manifest, plan_from_manifests, verify_manifests, verify_move
+from tests.helpers import make_conflict_manifests, make_move_case, prepare_nas_root, rows, write, write_rows
 
 
 def test_verify_manifests_byte_checks_same_hash_groups(tmp_path: Path) -> None:
@@ -125,11 +122,11 @@ def test_verify_manifests_byte_check_fails_same_hash_different_sidecar_bytes(tmp
 
 
 def test_verify_move_passes_after_manifest_move(tmp_path: Path) -> None:
-    manifests, plan_path, _nas_one, _nas_two, output_root = make_manifest_move_case(tmp_path, with_sidecars=True)
-    execute_plan(plan_path, tmp_path / "execute.csv", move=True)
+    case = make_move_case(tmp_path, with_sidecars=True)
+    execute_plan(case.plan_path, tmp_path / "execute.csv", move=True)
     log_path = tmp_path / "verify_move.csv"
 
-    result = verify_move(manifests, output_root, log_path)
+    result = verify_move(case.manifests, case.output_root, log_path)
 
     assert result.failed_paths == 0
     assert result.unexpected_outputs == 0
@@ -137,10 +134,10 @@ def test_verify_move_passes_after_manifest_move(tmp_path: Path) -> None:
     assert {row["disposition"] for row in rows(log_path)} == {"verify_move_matched"}
 
 def test_verify_move_fails_when_move_was_not_executed(tmp_path: Path) -> None:
-    manifests, _plan_path, _nas_one, _nas_two, output_root = make_manifest_move_case(tmp_path)
+    case = make_move_case(tmp_path)
     log_path = tmp_path / "verify_move.csv"
 
-    result = verify_move(manifests, output_root, log_path)
+    result = verify_move(case.manifests, case.output_root, log_path)
 
     assert result.failed_paths == 2
     assert {
@@ -150,23 +147,23 @@ def test_verify_move_fails_when_move_was_not_executed(tmp_path: Path) -> None:
     } == {"duplicate_source_still_exists", "expected_file_missing"}
 
 def test_verify_move_fails_when_keeper_is_missing(tmp_path: Path) -> None:
-    manifests, plan_path, nas_one, _nas_two, output_root = make_manifest_move_case(tmp_path)
-    execute_plan(plan_path, tmp_path / "execute.csv", move=True)
-    (nas_one / "photo.jpg").unlink()
+    case = make_move_case(tmp_path)
+    execute_plan(case.plan_path, tmp_path / "execute.csv", move=True)
+    (case.nas_one / "photo.jpg").unlink()
     log_path = tmp_path / "verify_move.csv"
 
-    result = verify_move(manifests, output_root, log_path)
+    result = verify_move(case.manifests, case.output_root, log_path)
 
     assert result.failed_paths == 1
     assert rows(log_path)[0]["reason"] == "expected_file_missing"
 
 def test_verify_move_fails_when_destination_size_mismatches(tmp_path: Path) -> None:
-    manifests, plan_path, _nas_one, _nas_two, output_root = make_manifest_move_case(tmp_path)
-    execute_plan(plan_path, tmp_path / "execute.csv", move=True)
-    (output_root / "nas-two" / "photo.jpg").write_bytes(b"wrong-size")
+    case = make_move_case(tmp_path)
+    execute_plan(case.plan_path, tmp_path / "execute.csv", move=True)
+    (case.output_root / "nas-two" / "photo.jpg").write_bytes(b"wrong-size")
     log_path = tmp_path / "verify_move.csv"
 
-    result = verify_move(manifests, output_root, log_path)
+    result = verify_move(case.manifests, case.output_root, log_path)
 
     assert result.failed_paths == 1
     failure = [row for row in rows(log_path) if row["disposition"] == "verify_move_failed"][0]
@@ -235,6 +232,35 @@ def test_verify_move_uses_takeout_album_precedence(tmp_path: Path) -> None:
     keeper_rows = [row for row in rows(log_path) if row["event"] == "verify_move_keeper"]
     assert keeper_rows[0]["source_path"] == str(nas_one / "photo.jpg")
 
+
+def test_verify_move_fails_when_mobilebackup_was_kept_over_takeout_date_folder(tmp_path: Path) -> None:
+    local_takeout = tmp_path / "Photos from 2021"
+    local_mobilebackup = tmp_path / "mobilebackup"
+    manifest_takeout = tmp_path / "takeout.csv"
+    manifest_mobilebackup = tmp_path / "mobilebackup.csv"
+    output_root = tmp_path / "dupes"
+    write(local_takeout / "photo.jpg", b"same")
+    write(local_mobilebackup / "DCIM" / "photo.jpg", b"same")
+    nas_takeout = prepare_nas_root(local_takeout, tmp_path / "nas" / "takeout")
+    nas_mobilebackup = prepare_nas_root(local_mobilebackup, tmp_path / "nas")
+    write(nas_takeout / "photo.jpg", b"same")
+    write(nas_mobilebackup / "DCIM" / "photo.jpg", b"same")
+    generate_manifest(local_takeout, nas_takeout, manifest_takeout)
+    generate_manifest(local_mobilebackup, nas_mobilebackup, manifest_mobilebackup)
+    wrong_destination = output_root / "Photos from 2021" / "photo.jpg"
+    wrong_destination.parent.mkdir(parents=True)
+    (nas_takeout / "photo.jpg").rename(wrong_destination)
+    log_path = tmp_path / "verify_move.csv"
+
+    result = verify_move([manifest_takeout, manifest_mobilebackup], output_root, log_path)
+
+    assert result.failed_paths > 0
+    keeper_rows = [row for row in rows(log_path) if row["event"] == "verify_move_keeper"]
+    assert keeper_rows[0]["source_path"] == str(nas_takeout / "photo.jpg")
+    assert keeper_rows[0]["disposition"] == "verify_move_failed"
+    assert "unexpected_output_file" in {row["reason"] for row in rows(log_path)}
+
+
 def test_verify_move_fails_when_sidecar_conflict_file_was_moved(tmp_path: Path) -> None:
     manifests, _nas_one, nas_two, output_root = make_conflict_manifests(tmp_path)
     destination = output_root / "nas-two" / "photo.json"
@@ -249,12 +275,12 @@ def test_verify_move_fails_when_sidecar_conflict_file_was_moved(tmp_path: Path) 
     assert "expected_file_missing" in {row["reason"] for row in rows(log_path)}
 
 def test_verify_move_fails_on_extra_output_file(tmp_path: Path) -> None:
-    manifests, plan_path, _nas_one, _nas_two, output_root = make_manifest_move_case(tmp_path)
-    execute_plan(plan_path, tmp_path / "execute.csv", move=True)
-    write(output_root / "extra.txt", b"extra")
+    case = make_move_case(tmp_path)
+    execute_plan(case.plan_path, tmp_path / "execute.csv", move=True)
+    write(case.output_root / "extra.txt", b"extra")
     log_path = tmp_path / "verify_move.csv"
 
-    result = verify_move(manifests, output_root, log_path)
+    result = verify_move(case.manifests, case.output_root, log_path)
 
     assert result.failed_paths == 0
     assert result.unexpected_outputs == 1

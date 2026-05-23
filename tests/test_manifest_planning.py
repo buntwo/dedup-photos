@@ -1,14 +1,11 @@
 from __future__ import annotations
 
-import csv
 from pathlib import Path
 
 import pytest
 
-from dedup_photos.cli import default_manifest_output_path, manifest_main
-from dedup_photos.constants import MANIFEST_VERSION
-from dedup_photos.manifest import MANIFEST_FIELDS, execute_plan, generate_manifest, plan_from_manifests, verify_manifests, verify_move
-from tests.helpers import make_conflict_manifests, make_manifest_move_case, make_move_plan, prepare_nas_root, rows, write, write_csv, write_rows
+from dedup_photos.manifest import generate_manifest, plan_from_manifests
+from tests.helpers import make_move_case, prepare_nas_root, rows, write
 
 
 def test_plan_from_manifests_uses_sidecar_precedence_and_nas_destinations(tmp_path: Path) -> None:
@@ -68,6 +65,34 @@ def test_plan_from_manifests_skips_sidecar_conflicts(tmp_path: Path) -> None:
     assert all(row["xxh128"] for row in conflict_sidecar_rows)
     assert all(row["source_path"] for row in plan_rows)
     assert not [row for row in plan_rows if row["event"] == "duplicate_group_skipped"]
+    assert not [row for row in plan_rows if row["event"] == "duplicate_primary_move"]
+
+
+def test_plan_from_manifests_skips_three_copy_sidecar_conflict_group(tmp_path: Path) -> None:
+    local_one = tmp_path / "one"
+    local_two = tmp_path / "two"
+    local_three = tmp_path / "three"
+    manifests = [tmp_path / "one.csv", tmp_path / "two.csv", tmp_path / "three.csv"]
+    log_path = tmp_path / "plan.csv"
+    write(local_one / "photo.jpg", b"same")
+    write(local_one / "photo.mov", b"left")
+    write(local_two / "photo.jpg", b"same")
+    write(local_two / "photo.mov", b"right")
+    write(local_three / "photo.jpg", b"same")
+    nas_one = prepare_nas_root(local_one, tmp_path / "nas")
+    nas_two = prepare_nas_root(local_two, tmp_path / "nas")
+    nas_three = prepare_nas_root(local_three, tmp_path / "nas")
+    generate_manifest(local_one, nas_one, manifests[0])
+    generate_manifest(local_two, nas_two, manifests[1])
+    generate_manifest(local_three, nas_three, manifests[2])
+
+    result = plan_from_manifests(manifests, Path("/dupes"), log_path)
+
+    plan_rows = rows(log_path)
+    assert result.skipped_groups == 1
+    assert result.duplicate_files == 0
+    assert len([row for row in plan_rows if row["disposition"] == "kept_sidecar_conflict"]) == 3
+    assert len([row for row in plan_rows if row["disposition"] == "kept_sidecar_conflict_sidecar"]) == 2
     assert not [row for row in plan_rows if row["event"] == "duplicate_primary_move"]
 
 def test_same_size_different_hashes_remain_unique(tmp_path: Path) -> None:
@@ -184,6 +209,25 @@ def test_plan_from_manifests_prefers_takeout_album_over_date_folder(tmp_path: Pa
     keeper = [row for row in rows(log_path) if row["event"] == "keeper_primary"][0]
     assert keeper["source_path"] == str(nas_one / "photo.jpg")
 
+
+def test_plan_from_manifests_prefers_takeout_date_folder_over_mobilebackup(tmp_path: Path) -> None:
+    local_takeout = tmp_path / "Photos from 2021"
+    local_mobilebackup = tmp_path / "mobilebackup"
+    manifests = [tmp_path / "takeout.csv", tmp_path / "mobilebackup.csv"]
+    log_path = tmp_path / "plan.csv"
+    write(local_takeout / "photo.jpg", b"same")
+    write(local_mobilebackup / "DCIM" / "photo.jpg", b"same")
+    nas_takeout = prepare_nas_root(local_takeout, tmp_path / "nas" / "takeout")
+    nas_mobilebackup = prepare_nas_root(local_mobilebackup, tmp_path / "nas")
+    generate_manifest(local_takeout, nas_takeout, manifests[0])
+    generate_manifest(local_mobilebackup, nas_mobilebackup, manifests[1])
+
+    plan_from_manifests(manifests, Path("/dupes"), log_path)
+
+    keeper = [row for row in rows(log_path) if row["event"] == "keeper_primary"][0]
+    assert keeper["source_path"] == str(nas_takeout / "photo.jpg")
+
+
 def test_equivalent_sidecars_on_both_sides_allow_planning(tmp_path: Path) -> None:
     local_one = tmp_path / "one"
     local_two = tmp_path / "two"
@@ -207,12 +251,12 @@ def test_equivalent_sidecars_on_both_sides_allow_planning(tmp_path: Path) -> Non
     assert sidecar_move["source_path"] == str(nas_two / "photo.mp4")
 
 def test_plan_sidecar_rows_include_primary_source_path(tmp_path: Path) -> None:
-    plan_path, _nas_one, nas_two, _output_root = make_move_plan(
+    case = make_move_case(
         tmp_path,
         with_sidecars=True,
         full_primary_prefix_sidecar=True,
     )
 
-    sidecar = [row for row in rows(plan_path) if row["disposition"] == "planned_sidecar"][0]
-    assert sidecar["source_path"] == str(nas_two / "photo.jpg.json")
-    assert sidecar["primary_source_path"] == str(nas_two / "photo.jpg")
+    sidecar = [row for row in rows(case.plan_path) if row["disposition"] == "planned_sidecar"][0]
+    assert sidecar["source_path"] == str(case.nas_two / "photo.jpg.json")
+    assert sidecar["primary_source_path"] == str(case.nas_two / "photo.jpg")

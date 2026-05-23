@@ -119,15 +119,22 @@ def manifest_sidecar_signature(entry: ManifestEntry) -> tuple[str, ...]:
     return tuple(sorted(entry.sidecar_xxh128s))
 
 
-def manifest_keeper_key(entry: ManifestEntry) -> tuple[int, int, int, int, str, str]:
+def manifest_keeper_key(entry: ManifestEntry) -> tuple[int, int, int, str, str]:
     return (
         0 if entry.sidecar_paths else 1,
+        manifest_path_class(entry.nas_path),
         date_directory_score(entry.nas_path),
-        0 if has_takeout_segment(entry.nas_path) else 1,
-        1 if has_mobilebackup_segment(entry.nas_path) else 0,
         entry.nas_root_label.lower(),
         entry.relative_path.as_posix().lower(),
     )
+
+
+def manifest_path_class(path: Path) -> int:
+    if has_takeout_segment(path):
+        return 0
+    if has_mobilebackup_segment(path):
+        return 2
+    return 1
 
 
 def manifest_sort_key(entry: ManifestEntry) -> tuple[str, str]:
