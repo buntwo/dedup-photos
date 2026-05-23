@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import re
-from collections import defaultdict
+from collections import Counter, defaultdict
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -13,6 +13,8 @@ from dedup_photos.progress import Progress
 
 
 VERIFY_MOVE_DATE_DIRECTORY_TOKEN_RE = re.compile(r"(?<!\d)(?:\d{4}-\d{2}-\d{2}|\d{8}|\d{4})(?!\d)")
+VERIFY_MOVE_VIDEO_SIDECAR_EXTENSIONS = {".mov", ".mp4"}
+VERIFY_MOVE_JSON_SIDECAR_EXTENSIONS = {".json"}
 
 
 @dataclass(frozen=True)
@@ -213,6 +215,7 @@ def verify_move(
                     continue
 
                 keeper = verify_move_choose_keeper(group)
+                merge_needed = verify_move_required_sidecar_hashes(group) - Counter(keeper.sidecar_xxh128s)
                 for path, size_bytes, digest, file_role in verify_move_entry_source_checks(keeper):
                     matched = verify_move_log_source_intact(
                         logger,
@@ -237,15 +240,56 @@ def verify_move(
                 for duplicate in sorted(group, key=verify_move_sort_key):
                     if duplicate == keeper:
                         continue
-                    source_checks = verify_move_entry_source_checks(duplicate)
-                    for path, size_bytes, digest, file_role in source_checks:
+                    matched = verify_move_log_source_missing(
+                        logger,
+                        entry=duplicate,
+                        path=duplicate.nas_path,
+                        size_bytes=duplicate.size_bytes,
+                        digest=duplicate.xxh128,
+                        file_role="primary",
+                        group_id=group_id,
+                        keeper_path=keeper.nas_path,
+                    )
+                    checked_paths += 1
+                    if matched:
+                        matched_paths += 1
+                    else:
+                        failed_paths += 1
+                    progress.manifest_path_checked(matched)
+
+                    primary_destination = verify_move_destination_for(output_root, duplicate.nas_root_label, duplicate.relative_path)
+                    expected_destinations.add(primary_destination)
+                    matched = verify_move_log_destination_present(
+                        logger,
+                        entry=duplicate,
+                        path=primary_destination,
+                        size_bytes=duplicate.size_bytes,
+                        digest=duplicate.xxh128,
+                        file_role="primary",
+                        group_id=group_id,
+                        keeper_path=keeper.nas_path,
+                    )
+                    checked_paths += 1
+                    if matched:
+                        matched_paths += 1
+                    else:
+                        failed_paths += 1
+                    progress.manifest_path_checked(matched)
+
+                    for path, relative_path, size_bytes, digest in zip(
+                        duplicate.sidecar_paths,
+                        duplicate.sidecar_relative_paths,
+                        duplicate.sidecar_sizes,
+                        duplicate.sidecar_xxh128s,
+                        strict=True,
+                    ):
                         matched = verify_move_log_source_missing(
                             logger,
                             entry=duplicate,
                             path=path,
                             size_bytes=size_bytes,
                             digest=digest,
-                            file_role=file_role,
+                            file_role="sidecar",
                             group_id=group_id,
                             keeper_path=keeper.nas_path,
                         )
@@ -256,15 +300,38 @@ def verify_move(
                             failed_paths += 1
                         progress.manifest_path_checked(matched)
 
-                    for path, size_bytes, digest, file_role in verify_move_entry_destination_checks(duplicate, output_root):
-                        expected_destinations.add(path)
+                        if merge_needed[digest] > 0:
+                            merge_needed[digest] -= 1
+                            merge_destination = verify_move_merged_sidecar_path(path, duplicate.nas_path, keeper.nas_path)
+                            matched = verify_move_log_destination_present(
+                                logger,
+                                entry=duplicate,
+                                path=merge_destination,
+                                size_bytes=size_bytes,
+                                digest=digest,
+                                file_role="sidecar",
+                                group_id=group_id,
+                                keeper_path=keeper.nas_path,
+                                event="verify_move_sidecar_merge",
+                                reason="merged_sidecar_present",
+                            )
+                            checked_paths += 1
+                            if matched:
+                                matched_paths += 1
+                            else:
+                                failed_paths += 1
+                            progress.manifest_path_checked(matched)
+                            continue
+
+                        sidecar_destination = verify_move_destination_for(output_root, duplicate.nas_root_label, relative_path)
+                        expected_destinations.add(sidecar_destination)
                         matched = verify_move_log_destination_present(
                             logger,
                             entry=duplicate,
-                            path=path,
+                            path=sidecar_destination,
                             size_bytes=size_bytes,
                             digest=digest,
-                            file_role=file_role,
+                            file_role="sidecar",
                             group_id=group_id,
                             keeper_path=keeper.nas_path,
                         )
@@ -338,12 +405,16 @@ def verify_move_expected_check_count(groups: list[list[ManifestEntry]], uniques:
             count += sum(len(verify_move_entry_source_checks(entry)) for entry in group)
             continue
         keeper = verify_move_choose_keeper(group)
+        merge_needed = verify_move_required_sidecar_hashes(group) - Counter(keeper.sidecar_xxh128s)
         count += len(verify_move_entry_source_checks(keeper))
         for duplicate in group:
             if duplicate == keeper:
                 continue
-            count += len(verify_move_entry_source_checks(duplicate))
-            count += len(verify_move_entry_destination_checks(duplicate, Path()))
+            count += 2
+            for digest in duplicate.sidecar_xxh128s:
+                count += 2
+                if merge_needed[digest] > 0:
+                    merge_needed[digest] -= 1
     return count
 
 
@@ -351,8 +422,9 @@ def verify_move_sidecar_conflict(group: list[ManifestEntry]) -> bool:
     with_sidecars = [entry for entry in group if entry.sidecar_paths]
     if len(with_sidecars) <= 1:
         return False
-    first = verify_move_sidecar_signature(with_sidecars[0])
-    return any(verify_move_sidecar_signature(entry) != first for entry in with_sidecars[1:])
+    if verify_move_sidecar_superset_candidates(with_sidecars):
+        return False
+    return not verify_move_sidecars_are_class_merge_compatible(group)
 
 
 def verify_move_sidecar_signature(entry: ManifestEntry) -> tuple[str, ...]:
@@ -360,7 +432,70 @@ def verify_move_sidecar_signature(entry: ManifestEntry) -> tuple[str, ...]:
 
 
 def verify_move_choose_keeper(group: list[ManifestEntry]) -> ManifestEntry:
+    with_sidecars = [entry for entry in group if entry.sidecar_paths]
+    if with_sidecars:
+        candidates = verify_move_sidecar_superset_candidates(with_sidecars)
+        if candidates:
+            return sorted(candidates, key=verify_move_keeper_key)[0]
+        if not verify_move_sidecars_are_class_merge_compatible(group):
+            return sorted(group, key=verify_move_keeper_key)[0]
     return sorted(group, key=verify_move_keeper_key)[0]
+
+
+def verify_move_sidecar_superset_candidates(entries: list[ManifestEntry]) -> list[ManifestEntry]:
+    counters = [(entry, Counter(entry.sidecar_xxh128s)) for entry in entries]
+    return [
+        entry
+        for entry, counter in counters
+        if all(counter >= other_counter for _other_entry, other_counter in counters)
+    ]
+
+
+def verify_move_sidecars_are_class_merge_compatible(entries: list[ManifestEntry]) -> bool:
+    class_counters = verify_move_sidecar_class_counters(entries)
+    if class_counters is None:
+        return False
+    for counters in class_counters.values():
+        if not counters:
+            continue
+        if not any(all(candidate >= other for other in counters) for candidate in counters):
+            return False
+    return True
+
+
+def verify_move_sidecar_class_counters(entries: list[ManifestEntry]) -> dict[str, list[Counter[str]]] | None:
+    counters_by_class: dict[str, list[Counter[str]]] = defaultdict(list)
+    for entry in entries:
+        entry_counters: dict[str, Counter[str]] = defaultdict(Counter)
+        for path, digest in zip(entry.sidecar_paths, entry.sidecar_xxh128s, strict=True):
+            sidecar_class = verify_move_sidecar_class(path)
+            if sidecar_class is None:
+                return None
+            entry_counters[sidecar_class][digest] += 1
+        for sidecar_class in ("video", "json"):
+            counter = entry_counters.get(sidecar_class, Counter())
+            if counter:
+                counters_by_class[sidecar_class].append(counter)
+    return counters_by_class
+
+
+def verify_move_required_sidecar_hashes(entries: list[ManifestEntry]) -> Counter[str]:
+    required: Counter[str] = Counter()
+    class_counters = verify_move_sidecar_class_counters(entries) or {}
+    for counters in class_counters.values():
+        if not counters:
+            continue
+        required.update(sorted(counters, key=lambda counter: sum(counter.values()), reverse=True)[0])
+    return required
+
+
+def verify_move_sidecar_class(path: Path) -> str | None:
+    suffix = path.suffix.lower()
+    if suffix in VERIFY_MOVE_VIDEO_SIDECAR_EXTENSIONS:
+        return "video"
+    if suffix in VERIFY_MOVE_JSON_SIDECAR_EXTENSIONS:
+        return "json"
+    return None
 
 
 def verify_move_keeper_key(entry: ManifestEntry) -> tuple[int, int, int, str, str]:
@@ -437,6 +572,22 @@ def verify_move_destination_for(output_root: Path, nas_root_label: str, relative
     return output_root / nas_root_label / relative_path
 
 
+def verify_move_merged_sidecar_path(sidecar_path: Path, duplicate_primary_path: Path, keeper_primary_path: Path) -> Path:
+    sidecar_name = sidecar_path.name
+    duplicate_name = duplicate_primary_path.name
+    duplicate_stem = duplicate_primary_path.stem
+    keeper_name = keeper_primary_path.name
+    keeper_stem = keeper_primary_path.stem
+    sidecar_lower = sidecar_name.lower()
+    duplicate_name_lower = duplicate_name.lower()
+    duplicate_stem_lower = duplicate_stem.lower()
+    if sidecar_lower.startswith(duplicate_name_lower):
+        return keeper_primary_path.parent / f"{keeper_name}{sidecar_name[len(duplicate_name):]}"
+    if sidecar_lower.startswith(duplicate_stem_lower):
+        return keeper_primary_path.parent / f"{keeper_stem}{sidecar_name[len(duplicate_stem):]}"
+    return keeper_primary_path.parent / f"{keeper_stem}{sidecar_path.suffix}"
+
+
 def verify_move_log_source_intact(
     logger: CsvLogger,
     *,
@@ -507,12 +658,14 @@ def verify_move_log_destination_present(
     file_role: str,
     group_id: str,
     keeper_path: Path,
+    event: str = "verify_move_duplicate_destination",
+    reason: str = "duplicate_destination_present",
 ) -> bool:
     status, failure_reason = verify_move_existing_file_status(path, size_bytes)
     matched = status == "matched"
     logger.row(
         disposition="verify_move_matched" if matched else "verify_move_failed",
-        event="verify_move_duplicate_destination",
+        event=event,
         status="moved" if matched else "error",
         group_id=group_id,
         file_role=file_role,
@@ -521,7 +674,7 @@ def verify_move_log_destination_present(
         keeper_path=keeper_path,
         size_bytes=size_bytes,
         digest=digest,
-        reason="duplicate_destination_present" if matched else failure_reason,
+        reason=reason if matched else failure_reason,
     )
     return matched
 

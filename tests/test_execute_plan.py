@@ -6,7 +6,7 @@ import pytest
 
 import dedup_photos.execute as execute_module
 from dedup_photos.manifest import execute_plan
-from tests.helpers import make_move_case, rows, write, write_csv
+from tests.helpers import make_move_case, make_sidecar_merge_case, rows, write, write_csv
 
 
 def execute_rows_without_keeper(log_path: Path) -> list[dict[str, str]]:
@@ -132,6 +132,86 @@ def test_execute_plan_moves_full_primary_prefix_sidecar(tmp_path: Path) -> None:
     assert (case.output_root / "nas-two" / "photo.jpg").read_bytes() == b"same"
     assert (case.output_root / "nas-two" / "photo.jpg.json").read_bytes() == b"live"
     assert "orphan_plan_sidecar" not in {row["disposition"] for row in rows(log_path)}
+
+
+def test_execute_plan_merges_sidecar_into_keeper_bundle(tmp_path: Path) -> None:
+    case = make_sidecar_merge_case(tmp_path)
+    log_path = tmp_path / "execute.csv"
+
+    result = execute_plan(case.plan_path, log_path, move=True)
+
+    assert result.moved_bundles == 1
+    assert (case.nas_one / "foo.jpg").exists()
+    assert (case.nas_one / "foo.mov").exists()
+    assert (case.nas_one / "foo.jpg.json").read_bytes() == b"metadata"
+    assert not (case.nas_two / "bar.jpg").exists()
+    assert not (case.nas_two / "bar.jpg.json").exists()
+    assert (case.output_root / "nas-two" / "bar.jpg").read_bytes() == b"same"
+    assert not (case.output_root / "nas-two" / "bar.jpg.json").exists()
+    execute_rows = rows(log_path)
+    assert "merged_sidecar" in {row["disposition"] for row in execute_rows}
+    merge = [row for row in execute_rows if row["disposition"] == "merged_sidecar"][0]
+    assert merge["destination_path"] == str(case.nas_one / "foo.jpg.json")
+    assert merge["action_taken"] == "merged"
+
+
+def test_execute_plan_existing_same_hash_merge_target_moves_source_sidecar_to_output(tmp_path: Path) -> None:
+    case = make_sidecar_merge_case(tmp_path)
+    write(case.nas_one / "foo.jpg.json", b"metadata")
+    log_path = tmp_path / "execute.csv"
+
+    result = execute_plan(case.plan_path, log_path, move=True)
+
+    assert result.moved_bundles == 1
+    assert (case.nas_one / "foo.jpg.json").read_bytes() == b"metadata"
+    assert not (case.nas_two / "bar.jpg.json").exists()
+    assert (case.output_root / "nas-two" / "bar.jpg.json").read_bytes() == b"metadata"
+    moved_sidecar = [row for row in rows(log_path) if row["source_path"] == str(case.nas_two / "bar.jpg.json")][0]
+    assert moved_sidecar["disposition"] == "moved_duplicate_sidecar"
+    assert moved_sidecar["destination_path"] == str(case.output_root / "nas-two" / "bar.jpg.json")
+
+
+def test_execute_plan_existing_different_hash_merge_target_skips_bundle(tmp_path: Path) -> None:
+    case = make_sidecar_merge_case(tmp_path)
+    write(case.nas_one / "foo.jpg.json", b"different")
+    log_path = tmp_path / "execute.csv"
+
+    result = execute_plan(case.plan_path, log_path, move=True)
+
+    assert result.skipped_bundles == 1
+    assert (case.nas_two / "bar.jpg").exists()
+    assert (case.nas_two / "bar.jpg.json").exists()
+    assert not (case.output_root / "nas-two" / "bar.jpg").exists()
+    assert {row["reason"] for row in execute_rows_without_keeper(log_path)} == {"merge_destination_hash_mismatch"}
+
+
+def test_execute_plan_rolls_back_primary_when_sidecar_merge_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    case = make_sidecar_merge_case(tmp_path)
+    log_path = tmp_path / "execute.csv"
+    original_move = execute_module.shutil.move
+    move_calls: list[tuple[Path, Path]] = []
+
+    def fail_second_move(source: str, destination: str) -> str:
+        move_calls.append((Path(source), Path(destination)))
+        if len(move_calls) == 2:
+            raise OSError("forced merge failure")
+        return original_move(source, destination)
+
+    monkeypatch.setattr(execute_module.shutil, "move", fail_second_move)
+
+    result = execute_plan(case.plan_path, log_path, move=True)
+
+    assert result.moved_bundles == 0
+    assert result.skipped_bundles == 1
+    assert (case.nas_two / "bar.jpg").read_bytes() == b"same"
+    assert (case.nas_two / "bar.jpg.json").read_bytes() == b"metadata"
+    assert not (case.nas_one / "foo.jpg.json").exists()
+    assert not (case.output_root / "nas-two" / "bar.jpg").exists()
+    assert {row["reason"] for row in execute_rows_without_keeper(log_path)} == {"move_failed"}
+
 
 def test_execute_plan_destination_collision_skips_bundle(tmp_path: Path) -> None:
     case = make_move_case(tmp_path, with_sidecars=True)
@@ -325,7 +405,7 @@ def test_execute_plan_orphan_sidecar_is_logged_and_ignored(tmp_path: Path) -> No
     case = make_move_case(tmp_path, with_sidecars=True)
     plan_rows = rows(case.plan_path)
     fieldnames = list(plan_rows[0])
-    sidecar_only = [row for row in plan_rows if row["disposition"] == "planned_sidecar"]
+    sidecar_only = [row for row in plan_rows if row["disposition"] == "planned_duplicate_sidecar"]
     write_csv(case.plan_path, fieldnames, sidecar_only)
     log_path = tmp_path / "execute.csv"
 
@@ -385,7 +465,7 @@ def test_execute_plan_ignores_non_planned_rows(tmp_path: Path) -> None:
             "multiple keeper rows",
         ),
         (
-            lambda plan_rows: [row for row in plan_rows if row["disposition"] == "planned_sidecar"][0].update(
+            lambda plan_rows: [row for row in plan_rows if row["disposition"] == "planned_duplicate_sidecar"][0].update(
                 {"primary_source_path": ""}
             ),
             "planned sidecar row must include primary_source_path",

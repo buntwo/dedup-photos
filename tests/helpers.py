@@ -74,6 +74,23 @@ def make_move_case(
     return MoveCase([manifest_one, manifest_two], plan_path, nas_one, nas_two, output_root)
 
 
+def make_sidecar_merge_case(tmp_path: Path) -> MoveCase:
+    nas_one = tmp_path / "nas-one"
+    nas_two = tmp_path / "nas-two"
+    output_root = tmp_path / "dupes"
+    manifest_one = tmp_path / "one.csv"
+    manifest_two = tmp_path / "two.csv"
+    plan_path = tmp_path / "plan.csv"
+    write(nas_one / "foo.jpg", b"same")
+    write(nas_one / "foo.mov", b"video")
+    write(nas_two / "bar.jpg", b"same")
+    write(nas_two / "bar.jpg.json", b"metadata")
+    generate_manifest(nas_one, nas_one, manifest_one)
+    generate_manifest(nas_two, nas_two, manifest_two)
+    plan_from_manifests([manifest_one, manifest_two], output_root, plan_path)
+    return MoveCase([manifest_one, manifest_two], plan_path, nas_one, nas_two, output_root)
+
+
 def make_conflict_manifests(tmp_path: Path) -> tuple[list[Path], Path, Path, Path]:
     nas_one = tmp_path / "nas-one"
     nas_two = tmp_path / "nas-two"

@@ -78,6 +78,7 @@ class PlanRow:
     row: dict[str, str]
     source_path: Path
     destination_path: Path
+    duplicate_output_path: Path | None
     size_bytes: int
     group_id: str
     file_role: str
@@ -91,3 +92,4 @@ class PlanBundle:
     keeper: PlanRow | None
     primary: PlanRow
     sidecars: tuple[PlanRow, ...]
+    merges: tuple[PlanRow, ...] = ()

@@ -5,7 +5,7 @@ from pathlib import Path
 import pytest
 
 from dedup_photos.manifest import execute_plan, generate_manifest, plan_from_manifests, verify_manifests, verify_move
-from tests.helpers import make_conflict_manifests, make_move_case, prepare_nas_root, rows, write, write_rows
+from tests.helpers import make_conflict_manifests, make_move_case, make_sidecar_merge_case, prepare_nas_root, rows, write, write_rows
 
 
 def test_verify_manifests_byte_checks_same_hash_groups(tmp_path: Path) -> None:
@@ -206,6 +206,80 @@ def test_verify_move_sidecar_conflict_group_must_remain_in_place(tmp_path: Path)
     assert result.failed_paths == 0
     assert result.unexpected_outputs == 0
     assert {row["disposition"] for row in rows(log_path)} == {"verify_move_skipped_conflict_intact"}
+
+
+def test_verify_move_uses_sidecar_superset_as_keeper(tmp_path: Path) -> None:
+    local_one = tmp_path / "one"
+    local_two = tmp_path / "two"
+    manifest_one = tmp_path / "one.csv"
+    manifest_two = tmp_path / "two.csv"
+    output_root = tmp_path / "dupes"
+    write(local_one / "foo.jpg", b"same image")
+    write(local_one / "foo.mov", b"same video")
+    write(local_one / "foo.jpg.json", b"extra metadata")
+    write(local_two / "bar.jpg", b"same image")
+    write(local_two / "bar.mp4", b"same video")
+    nas_one = prepare_nas_root(local_one, tmp_path / "nas")
+    nas_two = prepare_nas_root(local_two, tmp_path / "nas")
+    write(nas_one / "foo.jpg", b"same image")
+    write(nas_one / "foo.mov", b"same video")
+    write(nas_one / "foo.jpg.json", b"extra metadata")
+    write(nas_two / "bar.jpg", b"same image")
+    write(nas_two / "bar.mp4", b"same video")
+    generate_manifest(local_one, nas_one, manifest_one)
+    generate_manifest(local_two, nas_two, manifest_two)
+    plan_path = tmp_path / "plan.csv"
+    plan_from_manifests([manifest_one, manifest_two], output_root, plan_path)
+    execute_plan(plan_path, tmp_path / "execute.csv", move=True)
+    log_path = tmp_path / "verify_move.csv"
+
+    result = verify_move([manifest_one, manifest_two], output_root, log_path)
+
+    assert result.failed_paths == 0
+    keeper_rows = [row for row in rows(log_path) if row["event"] == "verify_move_keeper"]
+    assert {row["source_path"] for row in keeper_rows} == {
+        str(nas_one / "foo.jpg"),
+        str(nas_one / "foo.mov"),
+        str(nas_one / "foo.jpg.json"),
+    }
+
+
+def test_verify_move_passes_after_sidecar_merge(tmp_path: Path) -> None:
+    case = make_sidecar_merge_case(tmp_path)
+    execute_plan(case.plan_path, tmp_path / "execute.csv", move=True)
+    log_path = tmp_path / "verify_move.csv"
+
+    result = verify_move(case.manifests, case.output_root, log_path)
+
+    assert result.failed_paths == 0
+    assert result.unexpected_outputs == 0
+    merge_rows = [row for row in rows(log_path) if row["event"] == "verify_move_sidecar_merge"]
+    assert merge_rows[0]["destination_path"] == str(case.nas_one / "foo.jpg.json")
+
+
+def test_verify_move_fails_when_merged_sidecar_left_in_source(tmp_path: Path) -> None:
+    case = make_sidecar_merge_case(tmp_path)
+    execute_plan(case.plan_path, tmp_path / "execute.csv", move=True)
+    write(case.nas_two / "bar.jpg.json", b"metadata")
+    log_path = tmp_path / "verify_move.csv"
+
+    result = verify_move(case.manifests, case.output_root, log_path)
+
+    assert result.failed_paths == 1
+    assert "duplicate_source_still_exists" in {row["reason"] for row in rows(log_path)}
+
+
+def test_verify_move_fails_when_merged_sidecar_destination_missing(tmp_path: Path) -> None:
+    case = make_sidecar_merge_case(tmp_path)
+    execute_plan(case.plan_path, tmp_path / "execute.csv", move=True)
+    (case.nas_one / "foo.jpg.json").unlink()
+    log_path = tmp_path / "verify_move.csv"
+
+    result = verify_move(case.manifests, case.output_root, log_path)
+
+    assert result.failed_paths == 1
+    assert "expected_file_missing" in {row["reason"] for row in rows(log_path)}
+
 
 def test_verify_move_uses_takeout_album_precedence(tmp_path: Path) -> None:
     local_one = tmp_path / "Trip to Turkey"

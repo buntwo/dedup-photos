@@ -214,10 +214,12 @@ python3 -c 'import collections, csv, sys; counts=collections.Counter(row["dispos
 For files with identical primary image size and hash, the kept copy is selected by precedence:
 
 1. Prefer primaries with associated sidecars.
-2. If both candidates have sidecars and the sidecar sets are incompatible, skip the group and log a sidecar conflict.
-3. Prefer Google Takeout paths over mobile backup paths.
-4. Within Takeout paths, prefer album/event-style folders over generic `Photos from YYYY` folders.
-5. Use sorted path order as the final deterministic tie-breaker.
+2. If sidecar hashes form a superset relationship, keep the superset bundle.
+3. If sidecars differ only by class, merge the missing `.mov`/`.mp4` or `.json` sidecar into the keeper bundle.
+4. If candidates have different sidecar hashes within the same class, skip the group and log a sidecar conflict.
+5. Prefer Google Takeout paths over mobile backup paths.
+6. Within Takeout paths, prefer album/event-style folders over generic `Photos from YYYY` folders.
+7. Use sorted path order as the final deterministic tie-breaker.
 
 Only non-keeper duplicates are planned for movement. Unique primary images are not moved.
 
@@ -246,12 +248,15 @@ Plan and execution CSVs include a `disposition` column intended for easy filteri
 - `kept_duplicate_keeper`
 - `planned_duplicate_primary`
 - `planned_duplicate_sidecar`
+- `planned_sidecar_merge`
 - `verified_keeper`
 - `keeper_error`
 - `moved_duplicate_primary`
 - `moved_duplicate_sidecar`
+- `merged_sidecar`
 - `already_moved_duplicate_primary`
 - `already_moved_sidecar`
+- `already_merged_sidecar`
 - `skipped_error_primary`
 - `skipped_error_sidecar`
 - `orphan_plan_sidecar`
@@ -260,7 +265,7 @@ Plan and execution CSVs include a `disposition` column intended for easy filteri
 
 Execution logs also include `observed_hash`, `hash_check`, `validation_result`, and `action_taken`. These make move-mode deviations easier to filter: `status=error` identifies rows that did not follow the plan, `validation_result` gives the specific cause, and `observed_hash` records the current hash when a source or already-moved destination was rehashed.
 
-Sidecar rows include `primary_source_path` so they can be traced back to the primary image without relying on filename stems.
+Sidecar rows include `primary_source_path` so they can be traced back to the primary image without relying on filename stems. Merge rows use `destination_path` for the keeper-side sidecar target and `duplicate_output_path` for the fallback duplicate holding path when the target already exists with the same hash.
 
 ## Progress Output
 
