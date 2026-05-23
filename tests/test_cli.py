@@ -1,0 +1,161 @@
+from __future__ import annotations
+
+import csv
+from pathlib import Path
+
+import pytest
+
+from dedup_photos.cli import default_manifest_output_path, manifest_main
+from dedup_photos.constants import MANIFEST_VERSION
+from dedup_photos.manifest import MANIFEST_FIELDS, execute_plan, generate_manifest, plan_from_manifests, verify_manifests, verify_move
+from tests.helpers import make_conflict_manifests, make_manifest_move_case, make_move_plan, prepare_nas_root, rows, write, write_csv, write_rows
+
+
+def test_manifest_cli_refuses_existing_default_manifest_path(tmp_path: Path) -> None:
+    local_root = tmp_path / "google_photos"
+    nas_root = tmp_path / "nas" / "google_photos"
+    default_manifest = tmp_path / "google_photos.manifest.csv"
+    write(local_root / "2024" / "photo.jpg", b"image")
+    prepare_nas_root(local_root, tmp_path / "nas")
+    default_manifest.write_text("do not overwrite\n", encoding="utf-8")
+
+    with pytest.raises(SystemExit) as exit_info:
+        manifest_main(["manifest", str(local_root), "--nas-root", str(nas_root)])
+
+    assert exit_info.value.code == 2
+    assert default_manifest.read_text(encoding="utf-8") == "do not overwrite\n"
+
+def test_manifest_cli_subcommands(tmp_path: Path) -> None:
+    local_one = tmp_path / "one"
+    local_two = tmp_path / "two"
+    nas_root = tmp_path / "nas"
+    manifest_one = tmp_path / "one.csv"
+    manifest_two = tmp_path / "two.csv"
+    plan_log = tmp_path / "plan.csv"
+    verify_log = tmp_path / "verify.csv"
+    write(local_one / "a.jpg", b"same")
+    write(local_two / "b.jpg", b"same")
+    write(nas_root / "one" / "a.jpg", b"same")
+    write(nas_root / "two" / "b.jpg", b"same")
+
+    assert manifest_main(["manifest", str(local_one), "--nas-root", str(nas_root / "one"), "--manifest", str(manifest_one)]) == 0
+    assert manifest_main(["manifest", str(local_two), "--nas-root", str(nas_root / "two"), "--manifest", str(manifest_two)]) == 0
+    assert manifest_main(["plan", str(manifest_one), str(manifest_two), "--output", str(tmp_path / "dupes"), "--log", str(plan_log)]) == 0
+    assert manifest_main(["verify-bytes", str(manifest_one), str(manifest_two), "--log", str(verify_log)]) == 0
+    assert manifest_one.exists()
+    assert manifest_two.exists()
+    assert [row for row in rows(plan_log) if row["event"] == "duplicate_primary_move"]
+    assert rows(verify_log)[0]["disposition"] == "verify_matched"
+
+def test_manifest_cli_subcommands_emit_progress(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    local_one = tmp_path / "one"
+    local_two = tmp_path / "two"
+    nas_root = tmp_path / "nas"
+    manifest_one = tmp_path / "one.csv"
+    manifest_two = tmp_path / "two.csv"
+    plan_log = tmp_path / "plan.csv"
+    execute_log = tmp_path / "execute.csv"
+    verify_log = tmp_path / "verify.csv"
+    move_verify_log = tmp_path / "move_verify.csv"
+    output_root = tmp_path / "dupes"
+    write(local_one / "a.jpg", b"same")
+    write(local_two / "b.jpg", b"same")
+    write(nas_root / "one" / "a.jpg", b"same")
+    write(nas_root / "two" / "b.jpg", b"same")
+
+    assert manifest_main(["manifest", str(local_one), "--nas-root", str(nas_root / "one"), "--manifest", str(manifest_one)]) == 0
+    progress = capsys.readouterr().err
+    assert "manifest-hash" in progress
+    assert "done=100.0%" in progress
+    assert "primaries_hashed=1" in progress
+    assert "planned_moves" not in progress
+    assert "manifests_loaded" not in progress
+    assert manifest_main(["manifest", str(local_two), "--nas-root", str(nas_root / "two"), "--manifest", str(manifest_two)]) == 0
+    assert "primaries_hashed=1" in capsys.readouterr().err
+    assert manifest_main(["plan", str(manifest_one), str(manifest_two), "--output", str(output_root), "--log", str(plan_log)]) == 0
+    progress = capsys.readouterr().err
+    assert "manifest-plan" in progress
+    assert "done=100.0%" in progress
+    assert "planned_moves=1" in progress
+    assert "primaries_hashed" not in progress
+    assert manifest_main(["verify-bytes", str(manifest_one), str(manifest_two), "--log", str(verify_log)]) == 0
+    progress = capsys.readouterr().err
+    assert "manifest-verify-bytes" in progress
+    assert "done=100.0%" in progress
+    assert "groups_checked=1" in progress
+    assert "planned_moves" not in progress
+    assert manifest_main(["execute-plan", str(plan_log), "--move", "--log", str(execute_log)]) == 0
+    progress = capsys.readouterr().err
+    assert "manifest-execute" in progress
+    assert "done=100.0%" in progress
+    assert "moved_files=1" in progress
+    assert "bytes_hashed" not in progress
+    assert manifest_main(["verify-move", str(manifest_one), str(manifest_two), "--output", str(output_root), "--log", str(move_verify_log)]) == 0
+    progress = capsys.readouterr().err
+    assert "manifest-verify-move" in progress
+    assert "manifest-output-scan" in progress
+    assert "done=100.0%" in progress
+    assert "paths_checked=3" in progress
+    assert "planned_moves" not in progress
+
+def test_manifest_cli_default_manifest_path(tmp_path: Path) -> None:
+    local_root = tmp_path / "google_photos"
+    nas_root = tmp_path / "nas" / "google_photos"
+    default_manifest = tmp_path / "google_photos.manifest.csv"
+    write(local_root / "2021" / "img.jpg", b"image")
+    prepare_nas_root(local_root, tmp_path / "nas")
+
+    assert manifest_main(["manifest", str(local_root), "--nas-root", str(nas_root)]) == 0
+
+    assert default_manifest.exists()
+    assert rows(default_manifest)[0]["nas_path"] == str(nas_root / "2021" / "img.jpg")
+
+def test_default_manifest_output_path_appends_manifest_suffix() -> None:
+    assert default_manifest_output_path(Path("/local/project/google_photos")) == Path(
+        "/local/project/google_photos.manifest.csv"
+    )
+
+def test_manifest_help_lists_manifest_commands(capsys: pytest.CaptureFixture[str]) -> None:
+    with pytest.raises(SystemExit) as exit_info:
+        manifest_main(["--help"])
+
+    assert exit_info.value.code == 0
+    help_text = capsys.readouterr().out
+    assert "manifest" in help_text
+    assert "plan" in help_text
+    assert "verify-bytes" in help_text
+    assert "execute-plan" in help_text
+    assert "verify-move" in help_text
+    assert "Typical workflow" in help_text
+
+def test_verify_move_cli_returns_nonzero_on_failure(tmp_path: Path) -> None:
+    manifests, _plan_path, _nas_one, _nas_two, output_root = make_manifest_move_case(tmp_path)
+    log_path = tmp_path / "verify_move.csv"
+
+    assert manifest_main(["verify-move", *[str(path) for path in manifests], "--output", str(output_root), "--log", str(log_path)]) == 1
+    assert [row for row in rows(log_path) if row["disposition"] == "verify_move_failed"]
+
+def test_execute_plan_cli_dry_run_and_move(tmp_path: Path) -> None:
+    plan_path, _nas_one, nas_two, output_root = make_move_plan(tmp_path)
+    dry_log = tmp_path / "dry.csv"
+    move_log = tmp_path / "move.csv"
+
+    assert manifest_main(["execute-plan", str(plan_path), "--log", str(dry_log)]) == 0
+    assert (nas_two / "photo.jpg").exists()
+    assert manifest_main(["execute-plan", str(plan_path), "--log", str(move_log), "--move"]) == 0
+
+    assert not (nas_two / "photo.jpg").exists()
+    assert (output_root / "nas-two" / "photo.jpg").exists()
+    assert rows(dry_log)[0]["disposition"] == "planned_duplicate_primary"
+    assert rows(move_log)[0]["disposition"] == "moved_duplicate_primary"
+
+def test_execute_plan_cli_verify_source_hashes(tmp_path: Path) -> None:
+    plan_path, _nas_one, nas_two, output_root = make_move_plan(tmp_path)
+    (nas_two / "photo.jpg").write_bytes(b"diff")
+    log_path = tmp_path / "execute.csv"
+
+    assert manifest_main(["execute-plan", str(plan_path), "--move", "--verify-source-hashes", "--log", str(log_path)]) == 1
+
+    assert (nas_two / "photo.jpg").exists()
+    assert not (output_root / "nas-two" / "photo.jpg").exists()
+    assert rows(log_path)[0]["reason"] == "source_hash_mismatch"
