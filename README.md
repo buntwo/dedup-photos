@@ -171,6 +171,50 @@ uv run dedup-photos verify-move \
 
 This checks paths and sizes only. Pair it with `verify-bytes` for byte-level duplicate proof.
 
+## Sanity Checks
+
+After creating a manifest, the number of manifest data rows should equal the number of regular files under the local batch root. Set these variables first:
+
+```bash
+LOCAL_ROOT=/local/project/google_photos
+MANIFEST=/local/project/google_photos.manifest.csv
+```
+
+Then compare the counts:
+
+```bash
+local_count=$(find "$LOCAL_ROOT" -type f | wc -l | tr -d ' ')
+manifest_count=$(python3 -c 'import csv, sys; print(sum(1 for _ in csv.DictReader(open(sys.argv[1], newline="", encoding="utf-8"))))' "$MANIFEST")
+printf 'local files:   %s\nmanifest rows: %s\n' "$local_count" "$manifest_count"
+test "$local_count" = "$manifest_count"
+```
+
+The number of primary image files should also equal the number of manifest rows marked `file_role=primary`:
+
+```bash
+image_count=$(find "$LOCAL_ROOT" -type f \( \
+  -iname '*.jpg' -o \
+  -iname '*.jpeg' -o \
+  -iname '*.heic' -o \
+  -iname '*.png' \
+\) | wc -l | tr -d ' ')
+primary_rows=$(python3 -c 'import csv, sys; print(sum(row["file_role"] == "primary" for row in csv.DictReader(open(sys.argv[1], newline="", encoding="utf-8"))))' "$MANIFEST")
+printf 'image files:  %s\nprimary rows: %s\n' "$image_count" "$primary_rows"
+test "$image_count" = "$primary_rows"
+```
+
+To inspect how the manifest classified every file:
+
+```bash
+python3 -c 'import collections, csv, sys; counts=collections.Counter(row["file_role"] for row in csv.DictReader(open(sys.argv[1], newline="", encoding="utf-8"))); [print(role, counts[role]) for role in sorted(counts)]' "$MANIFEST"
+```
+
+For plan and execution logs, the main thing to inspect is `disposition`:
+
+```bash
+python3 -c 'import collections, csv, sys; counts=collections.Counter(row["disposition"] for row in csv.DictReader(open(sys.argv[1], newline="", encoding="utf-8"))); [print(disposition, counts[disposition]) for disposition in sorted(counts)]' move_plan.csv
+```
+
 ## Keeper Rules
 
 For files with identical primary image size and hash, the kept copy is selected by precedence:
