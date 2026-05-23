@@ -15,21 +15,21 @@ from dedup_photos.progress import Progress
 
 
 MANIFEST_FIELDS = [
-    "manifest_version",
-    "created_at",
-    "batch_root",
-    "nas_root",
-    "nas_root_label",
-    "group_id",
+    "relative_path",
     "file_role",
     "status",
     "reason",
-    "nas_path",
-    "relative_path",
-    "primary_nas_path",
+    "group_id",
     "primary_relative_path",
     "size_bytes",
     "xxh128",
+    "nas_path",
+    "primary_nas_path",
+    "manifest_version",
+    "created_at",
+    "nas_root_label",
+    "batch_root",
+    "nas_root",
 ]
 
 

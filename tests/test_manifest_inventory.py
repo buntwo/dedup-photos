@@ -53,6 +53,34 @@ def test_generate_manifest_stores_nas_paths_and_sidecars(tmp_path: Path) -> None
     assert uncategorized["group_id"] == ""
     assert uncategorized["xxh128"]
 
+def test_generate_manifest_writes_debug_friendly_header_order(tmp_path: Path) -> None:
+    local_root = tmp_path / "google_photos"
+    nas_root = tmp_path / "nas" / "google_photos"
+    manifest_path = tmp_path / "manifest.csv"
+    write(local_root / "photo.jpg", b"image")
+    prepare_nas_root(local_root, tmp_path / "nas")
+
+    generate_manifest(local_root, nas_root, manifest_path)
+
+    header = manifest_path.read_text(encoding="utf-8").splitlines()[0].split(",")
+    assert header == [
+        "relative_path",
+        "file_role",
+        "status",
+        "reason",
+        "group_id",
+        "primary_relative_path",
+        "size_bytes",
+        "xxh128",
+        "nas_path",
+        "primary_nas_path",
+        "manifest_version",
+        "created_at",
+        "nas_root_label",
+        "batch_root",
+        "nas_root",
+    ]
+
 def test_generate_manifest_marks_ambiguous_sidecar_as_uncategorized(tmp_path: Path) -> None:
     local_root = tmp_path / "google_photos"
     nas_root = tmp_path / "nas" / "google_photos"
