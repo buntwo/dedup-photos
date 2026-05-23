@@ -132,6 +132,27 @@ def test_generate_manifest_dedupes_sidecar_match_paths(tmp_path: Path) -> None:
     assert sidecars[0]["relative_path"] == "photo.jpg.json"
     assert sidecars[0]["group_id"] == primary["group_id"]
 
+def test_generate_manifest_writes_uncategorized_files_in_directory_sort_order(tmp_path: Path) -> None:
+    local_root = tmp_path / "google_photos"
+    nas_root = tmp_path / "nas" / "google_photos"
+    manifest_path = tmp_path / "manifest.csv"
+    write(local_root / "2024" / "a-unrelated.json", b"metadata")
+    write(local_root / "2024" / "b.jpg", b"image")
+    write(local_root / "2024" / "b.MOV", b"video")
+    write(local_root / "2024" / "c-unrelated.json", b"metadata")
+    write(local_root / "2024" / "d.jpg", b"image")
+    prepare_nas_root(local_root, tmp_path / "nas")
+
+    generate_manifest(local_root, nas_root, manifest_path)
+
+    assert [row["relative_path"] for row in rows(manifest_path)] == [
+        "2024/a-unrelated.json",
+        "2024/b.jpg",
+        "2024/b.MOV",
+        "2024/c-unrelated.json",
+        "2024/d.jpg",
+    ]
+
 def test_generate_manifest_refuses_existing_manifest_path(tmp_path: Path) -> None:
     local_root = tmp_path / "google_photos"
     nas_root = tmp_path / "nas" / "google_photos"

@@ -62,6 +62,11 @@ def generate_manifest(
             )
         )
         sidecars_by_primary, uncategorized = classify_manifest_files(files_by_directory, primary_paths)
+        primary_by_sidecar = {
+            sidecar: primary
+            for primary, sidecars in sidecars_by_primary.items()
+            for sidecar in sidecars
+        }
         regular_file_count = sum(len(paths) for paths in files_by_directory.values())
         group_ids = {
             path: f"f{index:06d}"
@@ -76,33 +81,11 @@ def generate_manifest(
             writer = csv.DictWriter(file, fieldnames=MANIFEST_FIELDS)
             writer.writeheader()
             for directory in sorted(files_by_directory, key=lambda item: item.relative_to(local_root).as_posix()):
-                directory_primaries = [
-                    path
-                    for path in sorted(files_by_directory[directory], key=lambda item: item.name.lower())
-                    if is_primary_image(path)
-                ]
-                for path in directory_primaries:
-                    write_manifest_file_row(
-                        writer,
-                        path=path,
-                        local_root=local_root,
-                        nas_root=nas_root,
-                        manifest_version=MANIFEST_VERSION,
-                        created_at=created_at,
-                        batch_root=str(local_root),
-                        nas_root_str=nas_root_str,
-                        nas_root_label=nas_root_label,
-                        group_id=group_ids[path],
-                        file_role="primary",
-                        status="included",
-                        reason="",
-                        primary_path=None,
-                        progress=progress,
-                    )
-                    for sidecar in sorted(sidecars_by_primary[path], key=lambda item: item.name.lower()):
+                for path in sorted(files_by_directory[directory], key=lambda item: item.name.lower()):
+                    if is_primary_image(path):
                         write_manifest_file_row(
                             writer,
-                            path=sidecar,
+                            path=path,
                             local_root=local_root,
                             nas_root=nas_root,
                             manifest_version=MANIFEST_VERSION,
@@ -111,35 +94,50 @@ def generate_manifest(
                             nas_root_str=nas_root_str,
                             nas_root_label=nas_root_label,
                             group_id=group_ids[path],
-                            file_role="sidecar",
+                            file_role="primary",
                             status="included",
                             reason="",
-                            primary_path=path,
+                            primary_path=None,
                             progress=progress,
                         )
-                directory_uncategorized = [
-                    path
-                    for path in sorted(files_by_directory[directory], key=lambda item: item.name.lower())
-                    if path in uncategorized
-                ]
-                for path in directory_uncategorized:
-                    write_manifest_file_row(
-                        writer,
-                        path=path,
-                        local_root=local_root,
-                        nas_root=nas_root,
-                        manifest_version=MANIFEST_VERSION,
-                        created_at=created_at,
-                        batch_root=str(local_root),
-                        nas_root_str=nas_root_str,
-                        nas_root_label=nas_root_label,
-                        group_id="",
-                        file_role="uncategorized",
-                        status="skipped",
-                        reason=uncategorized[path],
-                        primary_path=None,
-                        progress=progress,
-                    )
+                        for sidecar in sorted(sidecars_by_primary[path], key=lambda item: item.name.lower()):
+                            write_manifest_file_row(
+                                writer,
+                                path=sidecar,
+                                local_root=local_root,
+                                nas_root=nas_root,
+                                manifest_version=MANIFEST_VERSION,
+                                created_at=created_at,
+                                batch_root=str(local_root),
+                                nas_root_str=nas_root_str,
+                                nas_root_label=nas_root_label,
+                                group_id=group_ids[path],
+                                file_role="sidecar",
+                                status="included",
+                                reason="",
+                                primary_path=path,
+                                progress=progress,
+                            )
+                    elif path in primary_by_sidecar:
+                        continue
+                    elif path in uncategorized:
+                        write_manifest_file_row(
+                            writer,
+                            path=path,
+                            local_root=local_root,
+                            nas_root=nas_root,
+                            manifest_version=MANIFEST_VERSION,
+                            created_at=created_at,
+                            batch_root=str(local_root),
+                            nas_root_str=nas_root_str,
+                            nas_root_label=nas_root_label,
+                            group_id="",
+                            file_role="uncategorized",
+                            status="skipped",
+                            reason=uncategorized[path],
+                            primary_path=None,
+                            progress=progress,
+                        )
     finally:
         progress.finish()
     return manifest_path
