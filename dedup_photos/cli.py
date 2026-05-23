@@ -45,8 +45,9 @@ def build_manifest_parser() -> argparse.ArgumentParser:
             "The manifest is a one-row-per-regular-file inventory. Rows are marked\n"
             "primary, sidecar, or uncategorized; primary/sidecar rows share group_id.\n\n"
             "--nas-root must already exist and be mounted/readable. Its basename must match\n"
-            "local_batch_root, and directories through two levels are checked as a quick\n"
-            "guard against pointing at the wrong NAS tree.\n\n"
+            "local_batch_root. By default, directories through two levels are checked as a\n"
+            "quick guard against pointing at the wrong NAS tree; use --structure-depth to\n"
+            "change this, or --structure-depth 0 to skip the directory tree comparison.\n\n"
             "Example:\n"
             "  copied NAS tree: /my/nas/google_photos\n"
             "  local copy:      /local/project/google_photos\n"
@@ -73,6 +74,15 @@ def build_manifest_parser() -> argparse.ArgumentParser:
         "--manifest",
         type=Path,
         help="CSV manifest path to create. Defaults to LOCAL_BATCH_ROOT.manifest.csv and must not already exist.",
+    )
+    manifest.add_argument(
+        "--structure-depth",
+        type=int,
+        default=2,
+        help=(
+            "Directory depth to compare between local_batch_root and --nas-root before hashing. "
+            "Depth 1 checks ROOT/foo; depth 2 checks ROOT/foo/bar. Default: 2; use 0 to skip."
+        ),
     )
 
     plan = subparsers.add_parser(
@@ -186,6 +196,7 @@ def manifest_main(argv: list[str] | None = None) -> int:
                 args.nas_root,
                 args.manifest or default_manifest_output_path(args.local_batch_root),
                 show_progress=True,
+                structure_depth=args.structure_depth,
             )
             print(f"Wrote manifest to {manifest_path}")
             return 0

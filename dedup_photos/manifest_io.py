@@ -38,13 +38,15 @@ def generate_manifest(
     nas_root: Path,
     manifest_path: Path,
     show_progress: bool = False,
+    structure_depth: int = 2,
 ) -> Path:
     local_root = local_batch_root.resolve()
     if not local_root.is_dir():
         raise ValueError(f"local batch root is not a directory: {local_batch_root}")
     if manifest_path.exists():
         raise ValueError(f"manifest already exists: {manifest_path}")
-    validate_manifest_roots(local_root, nas_root)
+    if structure_depth < 0:
+        raise ValueError(f"structure check depth must be non-negative: {structure_depth}")
 
     nas_root_str = str(nas_root)
     nas_root_label = nas_root.name
@@ -52,7 +54,16 @@ def generate_manifest(
     progress = Progress(mode="manifest", total_images=0, enabled=show_progress)
 
     try:
-        files_by_directory = regular_files_by_directory(local_root)
+        progress.note(f"manifest: validating roots local={local_root} nas={nas_root}")
+        validate_manifest_roots(local_root, nas_root, structure_depth=structure_depth, progress=progress)
+        progress.note(f"manifest: scanning regular files under {local_root}")
+        progress.start_indeterminate_phase("manifest-scan")
+        files_by_directory = regular_files_by_directory(local_root, progress)
+        regular_file_count = sum(len(paths) for paths in files_by_directory.values())
+        progress.note(
+            f"\nmanifest: scanned {regular_file_count} regular files in {len(files_by_directory)} directories"
+        )
+        progress.note("manifest: classifying primaries, sidecars, and uncategorized files")
         primary_paths = tuple(
             path
             for directory in sorted(files_by_directory, key=lambda item: item.relative_to(local_root).as_posix())
@@ -67,7 +78,6 @@ def generate_manifest(
             for primary, sidecars in sidecars_by_primary.items()
             for sidecar in sidecars
         }
-        regular_file_count = sum(len(paths) for paths in files_by_directory.values())
         group_ids = {
             path: f"f{index:06d}"
             for index, path in enumerate(
@@ -75,6 +85,11 @@ def generate_manifest(
                 start=1,
             )
         }
+        progress.note(
+            "manifest: hashing and writing rows "
+            f"primaries={len(primary_paths)} sidecars={len(primary_by_sidecar)} uncategorized={len(uncategorized)}"
+        )
+        progress.manifest_entries_scanned = 0
         progress.start_phase("manifest-hash", regular_file_count)
         manifest_path.parent.mkdir(parents=True, exist_ok=True)
         with manifest_path.open("w", newline="", encoding="utf-8") as file:
@@ -186,7 +201,12 @@ def write_manifest_file_row(
     progress.manifest_row_written()
 
 
-def validate_manifest_roots(local_root: Path, nas_root: Path, structure_depth: int = 2) -> None:
+def validate_manifest_roots(
+    local_root: Path,
+    nas_root: Path,
+    structure_depth: int = 2,
+    progress: Progress | None = None,
+) -> None:
     if not nas_root.exists():
         raise ValueError(f"NAS root does not exist: {nas_root}")
     if not nas_root.is_dir():
@@ -195,8 +215,18 @@ def validate_manifest_roots(local_root: Path, nas_root: Path, structure_depth: i
         raise ValueError(
             f"local batch root basename must match NAS root basename: {local_root.name!r} != {nas_root.name!r}"
         )
+    if structure_depth < 0:
+        raise ValueError(f"structure check depth must be non-negative: {structure_depth}")
+    if structure_depth == 0:
+        if progress is not None:
+            progress.note("manifest: skipping directory structure check because depth is 0")
+        return
 
+    if progress is not None:
+        progress.note(f"manifest: checking local directory structure to depth {structure_depth}")
     local_dirs = directory_relative_paths(local_root, structure_depth)
+    if progress is not None:
+        progress.note(f"manifest: checking NAS directory structure to depth {structure_depth}")
     nas_dirs = directory_relative_paths(nas_root, structure_depth)
     missing_on_nas = sorted(local_dirs - nas_dirs)
     extra_on_nas = sorted(nas_dirs - local_dirs)

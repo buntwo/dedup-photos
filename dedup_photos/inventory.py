@@ -4,14 +4,17 @@ from collections import defaultdict
 from pathlib import Path
 
 from dedup_photos.common import is_primary_image
+from dedup_photos.progress import Progress
 
 
-def regular_files_by_directory(root: Path) -> dict[Path, list[Path]]:
+def regular_files_by_directory(root: Path, progress: Progress | None = None) -> dict[Path, list[Path]]:
     files_by_directory: dict[Path, list[Path]] = defaultdict(list)
     for path in root.rglob("*"):
         if path.is_symlink() or not path.is_file():
             continue
         files_by_directory[path.parent].append(path)
+        if progress is not None:
+            progress.manifest_entry_scanned()
     return files_by_directory
 
 

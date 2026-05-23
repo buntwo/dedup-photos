@@ -38,6 +38,18 @@ class Progress:
     manifest_unexpected_outputs: int = 0
     manifest_bundles_processed: int = 0
 
+    def note(self, message: str) -> None:
+        if not self.enabled:
+            return
+        self.stream.write(f"{message}\n")
+        self.stream.flush()
+
+    def start_indeterminate_phase(self, phase: str) -> None:
+        self.phase = phase
+        self.phase_current = 0
+        self.phase_total = -1
+        self.render()
+
     def start_phase(self, phase: str, total: int) -> None:
         self.phase = phase
         self.phase_current = 0
@@ -133,16 +145,24 @@ class Progress:
     def render(self) -> None:
         if not self.enabled:
             return
-        percentage = 100.0 if self.phase_total == 0 else min(100.0, self.phase_current / self.phase_total * 100)
+        if self.phase_total < 0:
+            done = "done=  n/a"
+        else:
+            percentage = 100.0 if self.phase_total == 0 else min(100.0, self.phase_current / self.phase_total * 100)
+            done = f"done={percentage:5.1f}%"
         parts = [
             f"\r{self.phase}:",
-            f"done={percentage:5.1f}%",
+            done,
             *self.progress_parts(),
         ]
         self.stream.write(" ".join(parts))
         self.stream.flush()
 
     def progress_parts(self) -> list[str]:
+        if self.phase == "manifest-scan":
+            return [
+                f"files_seen={self.manifest_entries_scanned}",
+            ]
         if self.phase == "manifest-hash":
             return [
                 f"entries_scanned={self.manifest_entries_scanned}",

@@ -258,6 +258,35 @@ def test_generate_manifest_ignores_structure_differences_below_depth_two(tmp_pat
 
     assert rows(manifest_path)[0]["relative_path"] == "2024/May/local_only/photo.jpg"
 
+def test_generate_manifest_can_skip_directory_structure_check(tmp_path: Path) -> None:
+    local_root = tmp_path / "google_photos"
+    nas_root = tmp_path / "nas" / "google_photos"
+    manifest_path = tmp_path / "manifest.csv"
+    write(local_root / "2024" / "May" / "photo.jpg", b"image")
+    nas_root.mkdir(parents=True)
+
+    generate_manifest(local_root, nas_root, manifest_path, structure_depth=0)
+
+    assert rows(manifest_path)[0]["relative_path"] == "2024/May/photo.jpg"
+
+def test_generate_manifest_can_check_deeper_directory_structure(tmp_path: Path) -> None:
+    local_root = tmp_path / "google_photos"
+    nas_root = tmp_path / "nas" / "google_photos"
+    write(local_root / "2024" / "May" / "local_only" / "photo.jpg", b"image")
+    (nas_root / "2024" / "May" / "nas_only").mkdir(parents=True)
+
+    with pytest.raises(ValueError, match="missing local directories within depth 3"):
+        generate_manifest(local_root, nas_root, tmp_path / "manifest.csv", structure_depth=3)
+
+def test_generate_manifest_rejects_negative_structure_depth(tmp_path: Path) -> None:
+    local_root = tmp_path / "google_photos"
+    nas_root = tmp_path / "nas" / "google_photos"
+    write(local_root / "photo.jpg", b"image")
+    nas_root.mkdir(parents=True)
+
+    with pytest.raises(ValueError, match="structure check depth must be non-negative"):
+        generate_manifest(local_root, nas_root, tmp_path / "manifest.csv", structure_depth=-1)
+
 def test_load_manifest_rejects_missing_fields(tmp_path: Path) -> None:
     manifest_path = tmp_path / "bad.csv"
     manifest_path.write_text("manifest_version,nas_path\n1,/nas/photo.jpg\n", encoding="utf-8")

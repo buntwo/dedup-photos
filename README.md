@@ -80,7 +80,7 @@ is recorded with this NAS path:
 /my/nas/google_photos/2021/img.jpg
 ```
 
-The manifest command refuses to overwrite an existing manifest. It also checks that `--nas-root` exists, has the same basename as `local_batch_root`, and has matching directory structure through two levels as a quick wrong-root guard.
+The manifest command refuses to overwrite an existing manifest. It also checks that `--nas-root` exists, has the same basename as `local_batch_root`, and has matching directory structure through two levels as a quick wrong-root guard. Depth is counted below the root: depth 1 checks `ROOT/foo`, and depth 2 checks `ROOT/foo/bar`. Change that check with `--structure-depth N`, or use `--structure-depth 0` to skip the directory structure comparison while still checking that the NAS root exists and has the right basename.
 
 For multiple batches:
 

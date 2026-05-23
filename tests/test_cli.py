@@ -63,6 +63,10 @@ def test_manifest_cli_subcommands_emit_progress(tmp_path: Path, capsys: pytest.C
 
     assert manifest_main(["manifest", str(local_one), "--nas-root", str(nas_root / "one"), "--manifest", str(manifest_one)]) == 0
     progress = capsys.readouterr().err
+    assert "manifest: validating roots" in progress
+    assert "manifest: checking NAS directory structure" in progress
+    assert "manifest-scan" in progress
+    assert "files_seen=1" in progress
     assert "manifest-hash" in progress
     assert "done=100.0%" in progress
     assert "primaries_hashed=1" in progress
