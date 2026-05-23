@@ -1,10 +1,11 @@
 from __future__ import annotations
 
+import csv
 from pathlib import Path
 
 import pytest
 
-from dedup_photos.manifest import generate_manifest, plan_from_manifests
+from dedup_photos.manifest import analyze_json_sidecars, generate_manifest, plan_from_manifests
 from tests.helpers import make_move_case, make_sidecar_merge_case, prepare_nas_root, rows, write
 
 
@@ -30,11 +31,70 @@ def test_plan_from_manifests_uses_sidecar_precedence_and_nas_destinations(tmp_pa
     assert result.duplicate_files == 1
     plan_rows = rows(log_path)
     keeper = [row for row in plan_rows if row["event"] == "keeper_primary"][0]
+    keeper_sidecar = [row for row in plan_rows if row["disposition"] == "kept_duplicate_keeper_sidecar"][0]
     move = [row for row in plan_rows if row["event"] == "duplicate_primary_move"][0]
     assert keeper["source_path"] == str(nas_two / "photo.jpg")
+    assert keeper_sidecar["source_path"] == str(nas_two / "photo.mov")
+    assert keeper_sidecar["primary_source_path"] == str(nas_two / "photo.jpg")
+    assert keeper_sidecar["keeper_path"] == str(nas_two / "photo.jpg")
+    assert keeper_sidecar["xxh128"]
     assert move["source_path"] == str(nas_one / "photo.jpg")
     assert move["destination_path"] == str(output_root / "google photos" / "photo.jpg")
     assert move["xxh128"]
+
+
+def test_plan_csv_puts_debug_columns_first(tmp_path: Path) -> None:
+    local_one = tmp_path / "one"
+    local_two = tmp_path / "two"
+    manifest_one = tmp_path / "one.csv"
+    manifest_two = tmp_path / "two.csv"
+    log_path = tmp_path / "plan.csv"
+    write(local_one / "photo.jpg", b"same")
+    write(local_two / "photo.jpg", b"same")
+    nas_one = prepare_nas_root(local_one, tmp_path / "nas")
+    nas_two = prepare_nas_root(local_two, tmp_path / "nas")
+    generate_manifest(local_one, nas_one, manifest_one)
+    generate_manifest(local_two, nas_two, manifest_two)
+
+    plan_from_manifests([manifest_one, manifest_two], Path("/dupes"), log_path)
+
+    with log_path.open(newline="", encoding="utf-8") as file:
+        header = next(csv.reader(file))
+    assert header[:12] == [
+        "disposition",
+        "status",
+        "file_role",
+        "source_path",
+        "destination_path",
+        "duplicate_output_path",
+        "keeper_path",
+        "primary_source_path",
+        "group_id",
+        "event",
+        "reason",
+        "message",
+    ]
+    assert header[-2:] == ["mode", "timestamp"]
+
+
+def test_plan_from_manifests_emits_unique_sidecar_rows(tmp_path: Path) -> None:
+    local_root = tmp_path / "photos"
+    manifest_path = tmp_path / "photos.csv"
+    log_path = tmp_path / "plan.csv"
+    write(local_root / "photo.jpg", b"unique")
+    write(local_root / "photo.mov", b"live")
+    nas_root = prepare_nas_root(local_root, tmp_path / "nas")
+    generate_manifest(local_root, nas_root, manifest_path)
+
+    plan_from_manifests([manifest_path], Path("/dupes"), log_path)
+
+    plan_rows = rows(log_path)
+    sidecar = [row for row in plan_rows if row["disposition"] == "kept_unique_sidecar"][0]
+    assert sidecar["source_path"] == str(nas_root / "photo.mov")
+    assert sidecar["primary_source_path"] == str(nas_root / "photo.jpg")
+    assert sidecar["keeper_path"] == ""
+    assert sidecar["xxh128"]
+
 
 def test_plan_from_manifests_skips_sidecar_conflicts(tmp_path: Path) -> None:
     local_one = tmp_path / "one"
@@ -62,10 +122,130 @@ def test_plan_from_manifests_skips_sidecar_conflicts(tmp_path: Path) -> None:
     assert len(conflict_sidecar_rows) == 2
     assert {row["file_role"] for row in conflict_sidecar_rows} == {"sidecar"}
     assert {Path(row["source_path"]).name for row in conflict_sidecar_rows} == {"photo.json"}
+    assert all(row["primary_source_path"] for row in conflict_sidecar_rows)
     assert all(row["xxh128"] for row in conflict_sidecar_rows)
     assert all(row["source_path"] for row in plan_rows)
     assert not [row for row in plan_rows if row["event"] == "duplicate_group_skipped"]
     assert not [row for row in plan_rows if row["event"] == "duplicate_primary_move"]
+
+
+def test_plan_from_manifests_can_ignore_json_sidecar_field_differences(tmp_path: Path) -> None:
+    local_one = tmp_path / "one"
+    local_two = tmp_path / "two"
+    manifest_one = tmp_path / "one.csv"
+    manifest_two = tmp_path / "two.csv"
+    log_path = tmp_path / "plan.csv"
+    write(local_one / "photo.jpg", b"same")
+    write(local_one / "photo.jpg.json", b'{"description":"left"}')
+    write(local_two / "photo.jpg", b"same")
+    write(local_two / "photo.jpg.json", b'{"description":"right"}')
+    nas_one = prepare_nas_root(local_one, tmp_path / "nas")
+    nas_two = prepare_nas_root(local_two, tmp_path / "nas")
+    write(nas_one / "photo.jpg", b"same")
+    write(nas_one / "photo.jpg.json", b'{"description":"left","title":"same"}')
+    write(nas_two / "photo.jpg", b"same")
+    write(nas_two / "photo.jpg.json", b'{"description":"right","title":"same"}')
+    generate_manifest(local_one, nas_one, manifest_one)
+    generate_manifest(local_two, nas_two, manifest_two)
+
+    result = plan_from_manifests(
+        [manifest_one, manifest_two],
+        Path("/dupes"),
+        log_path,
+        ignore_json_sidecar_fields=True,
+    )
+
+    plan_rows = rows(log_path)
+    assert result.skipped_groups == 0
+    assert [row for row in plan_rows if row["disposition"] == "kept_duplicate_keeper_sidecar"]
+    duplicate_sidecar = [row for row in plan_rows if row["disposition"] == "planned_duplicate_sidecar"][0]
+    assert duplicate_sidecar["source_path"] == str(nas_two / "photo.jpg.json")
+    assert duplicate_sidecar["destination_path"] == "/dupes/two/photo.jpg.json"
+
+
+def test_plan_ignore_json_sidecar_fields_still_skips_video_conflicts(tmp_path: Path) -> None:
+    local_one = tmp_path / "one"
+    local_two = tmp_path / "two"
+    manifest_one = tmp_path / "one.csv"
+    manifest_two = tmp_path / "two.csv"
+    log_path = tmp_path / "plan.csv"
+    write(local_one / "foo.jpg", b"same")
+    write(local_one / "foo.mov", b"left video")
+    write(local_one / "foo.jpg.json", b'{"description":"left"}')
+    write(local_two / "bar.jpg", b"same")
+    write(local_two / "bar.mp4", b"right video")
+    write(local_two / "bar.jpg.json", b'{"description":"right"}')
+    nas_one = prepare_nas_root(local_one, tmp_path / "nas")
+    nas_two = prepare_nas_root(local_two, tmp_path / "nas")
+    generate_manifest(local_one, nas_one, manifest_one)
+    generate_manifest(local_two, nas_two, manifest_two)
+
+    result = plan_from_manifests(
+        [manifest_one, manifest_two],
+        Path("/dupes"),
+        log_path,
+        ignore_json_sidecar_fields=True,
+    )
+
+    assert result.skipped_groups == 1
+    assert not [row for row in rows(log_path) if row["event"] == "duplicate_primary_move"]
+
+
+def test_analyze_json_sidecars_reports_differing_keys(tmp_path: Path) -> None:
+    local_one = tmp_path / "one"
+    local_two = tmp_path / "two"
+    manifest_one = tmp_path / "one.csv"
+    manifest_two = tmp_path / "two.csv"
+    log_path = tmp_path / "json_analysis.csv"
+    write(local_one / "photo.jpg", b"same")
+    write(local_one / "photo.jpg.json", b'{"description":"left","title":"same"}')
+    write(local_two / "photo.jpg", b"same")
+    write(local_two / "photo.jpg.json", b'{"description":"right","title":"same"}')
+    nas_one = prepare_nas_root(local_one, tmp_path / "nas")
+    nas_two = prepare_nas_root(local_two, tmp_path / "nas")
+    write(nas_one / "photo.jpg", b"same")
+    write(nas_one / "photo.jpg.json", b'{"description":"left","title":"same"}')
+    write(nas_two / "photo.jpg", b"same")
+    write(nas_two / "photo.jpg.json", b'{"description":"right","title":"same"}')
+    generate_manifest(local_one, nas_one, manifest_one)
+    generate_manifest(local_two, nas_two, manifest_two)
+
+    result = analyze_json_sidecars([manifest_one, manifest_two], log_path)
+
+    analysis_rows = rows(log_path)
+    assert result.analyzed_groups == 1
+    assert result.differing_groups == 1
+    assert result.differing_keys == 1
+    assert {row["json_key"] for row in analysis_rows} == {"description"}
+    assert {row["json_value"] for row in analysis_rows} == {'"left"', '"right"'}
+    assert all(row["primary_source_path"] for row in analysis_rows)
+
+
+def test_analyze_json_sidecars_logs_parse_errors(tmp_path: Path) -> None:
+    local_one = tmp_path / "one"
+    local_two = tmp_path / "two"
+    manifest_one = tmp_path / "one.csv"
+    manifest_two = tmp_path / "two.csv"
+    log_path = tmp_path / "json_analysis.csv"
+    write(local_one / "photo.jpg", b"same")
+    write(local_one / "photo.jpg.json", b'{"description":"left"}')
+    write(local_two / "photo.jpg", b"same")
+    write(local_two / "photo.jpg.json", b'{')
+    nas_one = prepare_nas_root(local_one, tmp_path / "nas")
+    nas_two = prepare_nas_root(local_two, tmp_path / "nas")
+    write(nas_one / "photo.jpg", b"same")
+    write(nas_one / "photo.jpg.json", b'{"description":"left"}')
+    write(nas_two / "photo.jpg", b"same")
+    write(nas_two / "photo.jpg.json", b'{')
+    generate_manifest(local_one, nas_one, manifest_one)
+    generate_manifest(local_two, nas_two, manifest_two)
+
+    result = analyze_json_sidecars([manifest_one, manifest_two], log_path)
+
+    assert result.parse_errors == 1
+    failure = [row for row in rows(log_path) if row["status"] == "error"][0]
+    assert failure["reason"] == "json_parse_error"
+    assert failure["source_path"] == str(nas_two / "photo.jpg.json")
 
 
 def test_plan_from_manifests_skips_three_copy_sidecar_conflict_group(tmp_path: Path) -> None:

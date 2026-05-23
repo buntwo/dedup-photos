@@ -208,6 +208,83 @@ def test_verify_move_sidecar_conflict_group_must_remain_in_place(tmp_path: Path)
     assert {row["disposition"] for row in rows(log_path)} == {"verify_move_skipped_conflict_intact"}
 
 
+def test_verify_move_can_ignore_json_sidecar_field_differences(tmp_path: Path) -> None:
+    local_one = tmp_path / "one"
+    local_two = tmp_path / "two"
+    manifest_one = tmp_path / "one.csv"
+    manifest_two = tmp_path / "two.csv"
+    output_root = tmp_path / "dupes"
+    write(local_one / "photo.jpg", b"same")
+    write(local_one / "photo.jpg.json", b'{"description":"left"}')
+    write(local_two / "photo.jpg", b"same")
+    write(local_two / "photo.jpg.json", b'{"description":"right"}')
+    nas_one = prepare_nas_root(local_one, tmp_path / "nas")
+    nas_two = prepare_nas_root(local_two, tmp_path / "nas")
+    write(nas_one / "photo.jpg", b"same")
+    write(nas_one / "photo.jpg.json", b'{"description":"left"}')
+    write(nas_two / "photo.jpg", b"same")
+    write(nas_two / "photo.jpg.json", b'{"description":"right"}')
+    generate_manifest(local_one, nas_one, manifest_one)
+    generate_manifest(local_two, nas_two, manifest_two)
+    plan_path = tmp_path / "plan.csv"
+    plan_from_manifests(
+        [manifest_one, manifest_two],
+        output_root,
+        plan_path,
+        ignore_json_sidecar_fields=True,
+    )
+    execute_plan(plan_path, tmp_path / "execute.csv", move=True)
+    log_path = tmp_path / "verify_move.csv"
+
+    result = verify_move(
+        [manifest_one, manifest_two],
+        output_root,
+        log_path,
+        ignore_json_sidecar_fields=True,
+    )
+
+    assert result.failed_paths == 0
+    assert result.unexpected_outputs == 0
+    assert not (nas_two / "photo.jpg.json").exists()
+    assert (output_root / "two" / "photo.jpg.json").exists()
+
+
+def test_verify_move_ignore_json_sidecar_fields_still_skips_video_conflicts(tmp_path: Path) -> None:
+    local_one = tmp_path / "one"
+    local_two = tmp_path / "two"
+    manifest_one = tmp_path / "one.csv"
+    manifest_two = tmp_path / "two.csv"
+    output_root = tmp_path / "dupes"
+    write(local_one / "photo.jpg", b"same")
+    write(local_one / "photo.mov", b"left video")
+    write(local_one / "photo.jpg.json", b'{"description":"left"}')
+    write(local_two / "photo.jpg", b"same")
+    write(local_two / "photo.mov", b"right video")
+    write(local_two / "photo.jpg.json", b'{"description":"right"}')
+    nas_one = prepare_nas_root(local_one, tmp_path / "nas")
+    nas_two = prepare_nas_root(local_two, tmp_path / "nas")
+    write(nas_one / "photo.jpg", b"same")
+    write(nas_one / "photo.mov", b"left video")
+    write(nas_one / "photo.jpg.json", b'{"description":"left"}')
+    write(nas_two / "photo.jpg", b"same")
+    write(nas_two / "photo.mov", b"right video")
+    write(nas_two / "photo.jpg.json", b'{"description":"right"}')
+    generate_manifest(local_one, nas_one, manifest_one)
+    generate_manifest(local_two, nas_two, manifest_two)
+    log_path = tmp_path / "verify_move.csv"
+
+    result = verify_move(
+        [manifest_one, manifest_two],
+        output_root,
+        log_path,
+        ignore_json_sidecar_fields=True,
+    )
+
+    assert result.failed_paths == 0
+    assert result.unexpected_outputs == 0
+    assert {row["disposition"] for row in rows(log_path)} == {"verify_move_skipped_conflict_intact"}
+
+
 def test_verify_move_uses_sidecar_superset_as_keeper(tmp_path: Path) -> None:
     local_one = tmp_path / "one"
     local_two = tmp_path / "two"

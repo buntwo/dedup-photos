@@ -122,9 +122,54 @@ def test_manifest_help_lists_manifest_commands(capsys: pytest.CaptureFixture[str
     assert "manifest" in help_text
     assert "plan" in help_text
     assert "verify-bytes" in help_text
+    assert "analyze-json-sidecars" in help_text
     assert "execute-plan" in help_text
     assert "verify-move" in help_text
     assert "Typical workflow" in help_text
+
+
+def test_json_sidecar_cli_help_and_flags(capsys: pytest.CaptureFixture[str]) -> None:
+    with pytest.raises(SystemExit) as exit_info:
+        manifest_main(["plan", "--help"])
+
+    assert exit_info.value.code == 0
+    assert "--ignore-json-sidecar-fields" in capsys.readouterr().out
+
+    with pytest.raises(SystemExit) as exit_info:
+        manifest_main(["analyze-json-sidecars", "--help"])
+
+    assert exit_info.value.code == 0
+    assert "JSON sidecar" in capsys.readouterr().out
+
+    with pytest.raises(SystemExit) as exit_info:
+        manifest_main(["verify-move", "--help"])
+
+    assert exit_info.value.code == 0
+    assert "--ignore-json-sidecar-fields" in capsys.readouterr().out
+
+
+def test_analyze_json_sidecars_cli(tmp_path: Path) -> None:
+    local_one = tmp_path / "one"
+    local_two = tmp_path / "two"
+    nas_root = tmp_path / "nas"
+    manifest_one = tmp_path / "one.csv"
+    manifest_two = tmp_path / "two.csv"
+    log_path = tmp_path / "json_analysis.csv"
+    write(local_one / "photo.jpg", b"same")
+    write(local_one / "photo.jpg.json", b'{"description":"left"}')
+    write(local_two / "photo.jpg", b"same")
+    write(local_two / "photo.jpg.json", b'{"description":"right"}')
+    write(nas_root / "one" / "photo.jpg", b"same")
+    write(nas_root / "one" / "photo.jpg.json", b'{"description":"left"}')
+    write(nas_root / "two" / "photo.jpg", b"same")
+    write(nas_root / "two" / "photo.jpg.json", b'{"description":"right"}')
+
+    assert manifest_main(["manifest", str(local_one), "--nas-root", str(nas_root / "one"), "--manifest", str(manifest_one)]) == 0
+    assert manifest_main(["manifest", str(local_two), "--nas-root", str(nas_root / "two"), "--manifest", str(manifest_two)]) == 0
+    assert manifest_main(["analyze-json-sidecars", str(manifest_one), str(manifest_two), "--log", str(log_path)]) == 0
+
+    assert {row["json_key"] for row in rows(log_path)} == {"description"}
+
 
 def test_execute_plan_help_lists_hash_verification_opt_out(capsys: pytest.CaptureFixture[str]) -> None:
     with pytest.raises(SystemExit) as exit_info:

@@ -113,6 +113,28 @@ Planned duplicate destinations preserve a parallel structure under `--output`:
 
 The top directory under `--output` is the basename of the manifest's `--nas-root`.
 
+If strict planning skips many groups due to differing Google Photos JSON sidecars, review those differences first:
+
+```bash
+uv run dedup-photos analyze-json-sidecars \
+  /local/batches/google_photos.manifest.csv \
+  /local/batches/phone_backup.manifest.csv \
+  --log json_sidecar_analysis.csv
+```
+
+After review, you can explicitly treat JSON sidecars as equivalent:
+
+```bash
+uv run dedup-photos plan \
+  /local/batches/google_photos.manifest.csv \
+  /local/batches/phone_backup.manifest.csv \
+  --output /volume1/photo/dupes \
+  --log move_plan.csv \
+  --ignore-json-sidecar-fields
+```
+
+This flag is not the default. It does not edit JSON files; it keeps the keeper bundle's JSON in place and moves duplicate JSON sidecars to the duplicate holding tree.
+
 ### 3. Verify Bytes
 
 `verify-bytes` rereads NAS files in same-size/same-hash manifest buckets and performs byte-level comparisons. It checks primary images and sidecars.
@@ -170,6 +192,17 @@ uv run dedup-photos verify-move \
 
 This checks paths and sizes only. Pair it with `verify-bytes` for byte-level duplicate proof.
 
+If the plan was created with `--ignore-json-sidecar-fields`, use the same flag for move verification:
+
+```bash
+uv run dedup-photos verify-move \
+  /local/batches/google_photos.manifest.csv \
+  /local/batches/phone_backup.manifest.csv \
+  --output /volume1/photo/dupes \
+  --log move_verify.csv \
+  --ignore-json-sidecar-fields
+```
+
 ## Sanity Checks
 
 After creating a manifest, the number of manifest data rows should equal the number of regular files under the local batch root. Set these variables first:
@@ -223,6 +256,8 @@ For files with identical primary image size and hash, the kept copy is selected 
 
 Only non-keeper duplicates are planned for movement. Unique primary images are not moved.
 
+By default, JSON sidecars are compared strictly like other sidecars. `plan --ignore-json-sidecar-fields` treats `.json` sidecars as equivalent regardless of JSON field/content differences, while keeping motion sidecars such as `.mov` and `.mp4` strict.
+
 ## CSV Outputs
 
 Every command writes a CSV log. Pass `--log path/to/log.csv` to choose the path; otherwise the command writes a timestamped log in the current directory.
@@ -245,7 +280,9 @@ Batch-level fields such as `batch_root`, `nas_root`, and `nas_root_label` are at
 Plan and execution CSVs include a `disposition` column intended for easy filtering. Values include:
 
 - `kept_unique_primary`
+- `kept_unique_sidecar`
 - `kept_duplicate_keeper`
+- `kept_duplicate_keeper_sidecar`
 - `planned_duplicate_primary`
 - `planned_duplicate_sidecar`
 - `planned_sidecar_merge`
@@ -267,6 +304,8 @@ Execution logs also include `observed_hash`, `hash_check`, `validation_result`, 
 
 Sidecar rows include `primary_source_path` so they can be traced back to the primary image without relying on filename stems. Merge rows use `destination_path` for the keeper-side sidecar target and `duplicate_output_path` for the fallback duplicate holding path when the target already exists with the same hash.
 
+Plan and execution logs put debugging columns first: `disposition`, `status`, `file_role`, `source_path`, destination fields, keeper fields, group/event, reason/message, then size/hash and validation details. Constant or bookkeeping fields such as `input_root`, `mode`, and `timestamp` are at the end.
+
 ## Progress Output
 
 Progress is printed to stderr. Each progress line includes a phase-local percentage, so `manifest`, `plan`, `verify-bytes`, `execute-plan`, and `verify-move` each report their own progress rather than sharing one global percentage.
@@ -284,6 +323,7 @@ Show help for one step:
 ```bash
 uv run dedup-photos manifest --help
 uv run dedup-photos plan --help
+uv run dedup-photos analyze-json-sidecars --help
 uv run dedup-photos verify-bytes --help
 uv run dedup-photos execute-plan --help
 uv run dedup-photos verify-move --help

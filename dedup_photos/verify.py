@@ -148,6 +148,7 @@ def verify_move(
     output_root: Path,
     log_path: Path | None,
     show_progress: bool = False,
+    ignore_json_sidecar_fields: bool = False,
 ) -> VerifyMoveResult:
     progress = Progress(mode="manifest_verify_move", total_images=0, enabled=show_progress)
     try:
@@ -165,7 +166,10 @@ def verify_move(
 
         groups, uniques = verify_move_groups(entries)
         progress.manifest_group_stats(len(groups), len(uniques))
-        progress.start_phase("manifest-verify-move", verify_move_expected_check_count(groups, uniques))
+        progress.start_phase(
+            "manifest-verify-move",
+            verify_move_expected_check_count(groups, uniques, ignore_json_sidecar_fields),
+        )
         actual_log_path.parent.mkdir(parents=True, exist_ok=True)
         with actual_log_path.open("w", newline="", encoding="utf-8") as file:
             logger = CsvLogger(file, mode="verify_move", hash_field="xxh128")
@@ -191,7 +195,7 @@ def verify_move(
 
             for index, group in enumerate(groups, start=1):
                 group_id = f"m{index:06d}"
-                if verify_move_sidecar_conflict(group):
+                if verify_move_sidecar_conflict(group, ignore_json_sidecar_fields=ignore_json_sidecar_fields):
                     for entry in sorted(group, key=verify_move_sort_key):
                         for path, size_bytes, digest, file_role in verify_move_entry_source_checks(entry):
                             matched = verify_move_log_source_intact(
@@ -214,8 +218,11 @@ def verify_move(
                             progress.manifest_path_checked(matched)
                     continue
 
-                keeper = verify_move_choose_keeper(group)
-                merge_needed = verify_move_required_sidecar_hashes(group) - Counter(keeper.sidecar_xxh128s)
+                keeper = verify_move_choose_keeper(group, ignore_json_sidecar_fields=ignore_json_sidecar_fields)
+                merge_needed = verify_move_required_sidecar_keys(
+                    group,
+                    ignore_json_sidecar_fields,
+                ) - verify_move_entry_sidecar_key_counter(keeper, ignore_json_sidecar_fields)
                 for path, size_bytes, digest, file_role in verify_move_entry_source_checks(keeper):
                     matched = verify_move_log_source_intact(
                         logger,
@@ -300,8 +307,9 @@ def verify_move(
                             failed_paths += 1
                         progress.manifest_path_checked(matched)
 
-                        if merge_needed[digest] > 0:
-                            merge_needed[digest] -= 1
+                        sidecar_key = verify_move_sidecar_key(path, digest, ignore_json_sidecar_fields)
+                        if merge_needed[sidecar_key] > 0:
+                            merge_needed[sidecar_key] -= 1
                             merge_destination = verify_move_merged_sidecar_path(path, duplicate.nas_path, keeper.nas_path)
                             matched = verify_move_log_destination_present(
                                 logger,
@@ -398,52 +406,75 @@ def verify_move_groups(entries: list[ManifestEntry]) -> tuple[list[list[Manifest
     return groups, uniques
 
 
-def verify_move_expected_check_count(groups: list[list[ManifestEntry]], uniques: list[ManifestEntry]) -> int:
+def verify_move_expected_check_count(
+    groups: list[list[ManifestEntry]],
+    uniques: list[ManifestEntry],
+    ignore_json_sidecar_fields: bool = False,
+) -> int:
     count = sum(len(verify_move_entry_source_checks(entry)) for entry in uniques)
     for group in groups:
-        if verify_move_sidecar_conflict(group):
+        if verify_move_sidecar_conflict(group, ignore_json_sidecar_fields=ignore_json_sidecar_fields):
             count += sum(len(verify_move_entry_source_checks(entry)) for entry in group)
             continue
-        keeper = verify_move_choose_keeper(group)
-        merge_needed = verify_move_required_sidecar_hashes(group) - Counter(keeper.sidecar_xxh128s)
+        keeper = verify_move_choose_keeper(group, ignore_json_sidecar_fields=ignore_json_sidecar_fields)
+        merge_needed = verify_move_required_sidecar_keys(
+            group,
+            ignore_json_sidecar_fields,
+        ) - verify_move_entry_sidecar_key_counter(keeper, ignore_json_sidecar_fields)
         count += len(verify_move_entry_source_checks(keeper))
         for duplicate in group:
             if duplicate == keeper:
                 continue
             count += 2
-            for digest in duplicate.sidecar_xxh128s:
+            for path, digest in zip(duplicate.sidecar_paths, duplicate.sidecar_xxh128s, strict=True):
                 count += 2
-                if merge_needed[digest] > 0:
-                    merge_needed[digest] -= 1
+                sidecar_key = verify_move_sidecar_key(path, digest, ignore_json_sidecar_fields)
+                if merge_needed[sidecar_key] > 0:
+                    merge_needed[sidecar_key] -= 1
     return count
 
 
-def verify_move_sidecar_conflict(group: list[ManifestEntry]) -> bool:
+def verify_move_sidecar_conflict(group: list[ManifestEntry], ignore_json_sidecar_fields: bool = False) -> bool:
     with_sidecars = [entry for entry in group if entry.sidecar_paths]
     if len(with_sidecars) <= 1:
         return False
-    if verify_move_sidecar_superset_candidates(with_sidecars):
+    if verify_move_sidecar_superset_candidates(
+        with_sidecars,
+        ignore_json_sidecar_fields=ignore_json_sidecar_fields,
+    ):
         return False
-    return not verify_move_sidecars_are_class_merge_compatible(group)
+    return not verify_move_sidecars_are_class_merge_compatible(
+        group,
+        ignore_json_sidecar_fields=ignore_json_sidecar_fields,
+    )
 
 
 def verify_move_sidecar_signature(entry: ManifestEntry) -> tuple[str, ...]:
     return tuple(sorted(entry.sidecar_xxh128s))
 
 
-def verify_move_choose_keeper(group: list[ManifestEntry]) -> ManifestEntry:
+def verify_move_choose_keeper(group: list[ManifestEntry], ignore_json_sidecar_fields: bool = False) -> ManifestEntry:
     with_sidecars = [entry for entry in group if entry.sidecar_paths]
     if with_sidecars:
-        candidates = verify_move_sidecar_superset_candidates(with_sidecars)
+        candidates = verify_move_sidecar_superset_candidates(
+            with_sidecars,
+            ignore_json_sidecar_fields=ignore_json_sidecar_fields,
+        )
         if candidates:
             return sorted(candidates, key=verify_move_keeper_key)[0]
-        if not verify_move_sidecars_are_class_merge_compatible(group):
+        if not verify_move_sidecars_are_class_merge_compatible(
+            group,
+            ignore_json_sidecar_fields=ignore_json_sidecar_fields,
+        ):
             return sorted(group, key=verify_move_keeper_key)[0]
     return sorted(group, key=verify_move_keeper_key)[0]
 
 
-def verify_move_sidecar_superset_candidates(entries: list[ManifestEntry]) -> list[ManifestEntry]:
-    counters = [(entry, Counter(entry.sidecar_xxh128s)) for entry in entries]
+def verify_move_sidecar_superset_candidates(
+    entries: list[ManifestEntry],
+    ignore_json_sidecar_fields: bool = False,
+) -> list[ManifestEntry]:
+    counters = [(entry, verify_move_entry_sidecar_key_counter(entry, ignore_json_sidecar_fields)) for entry in entries]
     return [
         entry
         for entry, counter in counters
@@ -451,8 +482,14 @@ def verify_move_sidecar_superset_candidates(entries: list[ManifestEntry]) -> lis
     ]
 
 
-def verify_move_sidecars_are_class_merge_compatible(entries: list[ManifestEntry]) -> bool:
-    class_counters = verify_move_sidecar_class_counters(entries)
+def verify_move_sidecars_are_class_merge_compatible(
+    entries: list[ManifestEntry],
+    ignore_json_sidecar_fields: bool = False,
+) -> bool:
+    class_counters = verify_move_sidecar_class_counters(
+        entries,
+        ignore_json_sidecar_fields=ignore_json_sidecar_fields,
+    )
     if class_counters is None:
         return False
     for counters in class_counters.values():
@@ -463,7 +500,10 @@ def verify_move_sidecars_are_class_merge_compatible(entries: list[ManifestEntry]
     return True
 
 
-def verify_move_sidecar_class_counters(entries: list[ManifestEntry]) -> dict[str, list[Counter[str]]] | None:
+def verify_move_sidecar_class_counters(
+    entries: list[ManifestEntry],
+    ignore_json_sidecar_fields: bool = False,
+) -> dict[str, list[Counter[str]]] | None:
     counters_by_class: dict[str, list[Counter[str]]] = defaultdict(list)
     for entry in entries:
         entry_counters: dict[str, Counter[str]] = defaultdict(Counter)
@@ -471,7 +511,7 @@ def verify_move_sidecar_class_counters(entries: list[ManifestEntry]) -> dict[str
             sidecar_class = verify_move_sidecar_class(path)
             if sidecar_class is None:
                 return None
-            entry_counters[sidecar_class][digest] += 1
+            entry_counters[sidecar_class][verify_move_sidecar_key(path, digest, ignore_json_sidecar_fields)] += 1
         for sidecar_class in ("video", "json"):
             counter = entry_counters.get(sidecar_class, Counter())
             if counter:
@@ -480,13 +520,33 @@ def verify_move_sidecar_class_counters(entries: list[ManifestEntry]) -> dict[str
 
 
 def verify_move_required_sidecar_hashes(entries: list[ManifestEntry]) -> Counter[str]:
+    return verify_move_required_sidecar_keys(entries, ignore_json_sidecar_fields=False)
+
+
+def verify_move_required_sidecar_keys(entries: list[ManifestEntry], ignore_json_sidecar_fields: bool) -> Counter[str]:
     required: Counter[str] = Counter()
-    class_counters = verify_move_sidecar_class_counters(entries) or {}
+    class_counters = verify_move_sidecar_class_counters(
+        entries,
+        ignore_json_sidecar_fields=ignore_json_sidecar_fields,
+    ) or {}
     for counters in class_counters.values():
         if not counters:
             continue
         required.update(sorted(counters, key=lambda counter: sum(counter.values()), reverse=True)[0])
     return required
+
+
+def verify_move_entry_sidecar_key_counter(entry: ManifestEntry, ignore_json_sidecar_fields: bool) -> Counter[str]:
+    counter: Counter[str] = Counter()
+    for path, digest in zip(entry.sidecar_paths, entry.sidecar_xxh128s, strict=True):
+        counter[verify_move_sidecar_key(path, digest, ignore_json_sidecar_fields)] += 1
+    return counter
+
+
+def verify_move_sidecar_key(path: Path, digest: str, ignore_json_sidecar_fields: bool) -> str:
+    if ignore_json_sidecar_fields and path.suffix.lower() in VERIFY_MOVE_JSON_SIDECAR_EXTENSIONS:
+        return "__json_sidecar__"
+    return digest
 
 
 def verify_move_sidecar_class(path: Path) -> str | None:

@@ -4,7 +4,14 @@ import argparse
 import sys
 from pathlib import Path
 
-from dedup_photos.manifest import execute_plan, generate_manifest, plan_from_manifests, verify_manifests, verify_move
+from dedup_photos.manifest import (
+    analyze_json_sidecars,
+    execute_plan,
+    generate_manifest,
+    plan_from_manifests,
+    verify_manifests,
+    verify_move,
+)
 
 
 def build_manifest_parser() -> argparse.ArgumentParser:
@@ -19,6 +26,8 @@ def build_manifest_parser() -> argparse.ArgumentParser:
             "    --output /my/nas/dupes --log move_plan.csv\n"
             "  dedup-photos verify-bytes /local/project/google_photos.manifest.csv phone.manifest.csv \\\n"
             "    --log byte_verify.csv\n"
+            "  dedup-photos analyze-json-sidecars /local/project/google_photos.manifest.csv phone.manifest.csv \\\n"
+            "    --log json_sidecars.csv\n"
             "  dedup-photos execute-plan move_plan.csv --move --log execute.csv\n"
             "  dedup-photos verify-move /local/project/google_photos.manifest.csv phone.manifest.csv \\\n"
             "    --output /my/nas/dupes --log move_verify.csv"
@@ -83,6 +92,27 @@ def build_manifest_parser() -> argparse.ArgumentParser:
     plan.add_argument("manifests", nargs="+", type=Path, help="Manifest CSVs created by the manifest subcommand.")
     plan.add_argument("--output", required=True, type=Path, help="NAS duplicate holding directory for planned moves.")
     plan.add_argument("--log", type=Path, default=None, help="Move-plan CSV to write.")
+    plan.add_argument(
+        "--ignore-json-sidecar-fields",
+        action="store_true",
+        help="Treat JSON sidecars as equivalent regardless of JSON field/content differences. Default is strict.",
+    )
+
+    analyze_json = subparsers.add_parser(
+        "analyze-json-sidecars",
+        help="Report differing JSON sidecar keys in strict sidecar-conflict groups.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=(
+            "This reads JSON sidecars from NAS paths in manifest duplicate groups that strict\n"
+            "planning would skip due to sidecar conflicts involving .json files. Review this\n"
+            "before using plan --ignore-json-sidecar-fields.\n\n"
+            "Example:\n"
+            "  dedup-photos analyze-json-sidecars google_photos.manifest.csv phone.manifest.csv \\\n"
+            "    --log json_sidecar_analysis.csv"
+        ),
+    )
+    analyze_json.add_argument("manifests", nargs="+", type=Path, help="Manifest CSVs to analyze.")
+    analyze_json.add_argument("--log", type=Path, default=None, help="JSON sidecar analysis CSV to write.")
 
     verify = subparsers.add_parser(
         "verify-bytes",
@@ -137,6 +167,11 @@ def build_manifest_parser() -> argparse.ArgumentParser:
     verify_move_parser.add_argument("manifests", nargs="+", type=Path, help="Manifest CSVs used to create the move plan.")
     verify_move_parser.add_argument("--output", required=True, type=Path, help="Duplicate holding directory used by plan.")
     verify_move_parser.add_argument("--log", type=Path, default=None, help="CSV move-verification log to write.")
+    verify_move_parser.add_argument(
+        "--ignore-json-sidecar-fields",
+        action="store_true",
+        help="Use the same JSON-ignore policy as plan --ignore-json-sidecar-fields.",
+    )
     return parser
 
 
@@ -155,13 +190,27 @@ def manifest_main(argv: list[str] | None = None) -> int:
             print(f"Wrote manifest to {manifest_path}")
             return 0
         if args.command == "plan":
-            result = plan_from_manifests(args.manifests, args.output, args.log, show_progress=True)
+            result = plan_from_manifests(
+                args.manifests,
+                args.output,
+                args.log,
+                show_progress=True,
+                ignore_json_sidecar_fields=args.ignore_json_sidecar_fields,
+            )
             print(
                 f"Wrote manifest move plan to {result.log_path}; "
                 f"duplicate_groups={result.duplicate_groups} "
                 f"duplicate_files={result.duplicate_files} skipped_groups={result.skipped_groups}"
             )
             return 0
+        if args.command == "analyze-json-sidecars":
+            result = analyze_json_sidecars(args.manifests, args.log, show_progress=True)
+            print(
+                f"Completed JSON sidecar analysis; analyzed_groups={result.analyzed_groups} "
+                f"differing_groups={result.differing_groups} differing_keys={result.differing_keys} "
+                f"parse_errors={result.parse_errors}; wrote CSV log to {result.log_path}"
+            )
+            return 1 if result.parse_errors else 0
         if args.command == "verify-bytes":
             result = verify_manifests(args.manifests, args.log, byte_check=True, show_progress=True)
             print(
@@ -185,7 +234,13 @@ def manifest_main(argv: list[str] | None = None) -> int:
             )
             return 1 if result.skipped_bundles or result.orphan_sidecars else 0
         if args.command == "verify-move":
-            result = verify_move(args.manifests, args.output, args.log, show_progress=True)
+            result = verify_move(
+                args.manifests,
+                args.output,
+                args.log,
+                show_progress=True,
+                ignore_json_sidecar_fields=args.ignore_json_sidecar_fields,
+            )
             print(
                 f"Completed verify-move; checked_paths={result.checked_paths} "
                 f"matched_paths={result.matched_paths} failed_paths={result.failed_paths} "

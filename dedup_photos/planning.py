@@ -23,6 +23,7 @@ def plan_from_manifests(
     output_root: Path,
     log_path: Path | None,
     show_progress: bool = False,
+    ignore_json_sidecar_fields: bool = False,
 ) -> ManifestPlanResult:
     progress = Progress(mode="manifest_plan", total_images=0, enabled=show_progress)
     try:
@@ -50,10 +51,19 @@ def plan_from_manifests(
                     digest=unique.xxh128,
                     message="no equal primary image found in manifests",
                 )
+                log_manifest_kept_sidecars(
+                    logger,
+                    group_id="",
+                    entry=unique,
+                    disposition="kept_unique_sidecar",
+                    event="unique_sidecar",
+                    status="unique",
+                    reason="primary_is_unique",
+                )
                 progress.advance()
             for index, group in enumerate(groups, start=1):
                 group_id = f"m{index:06d}"
-                keeper = choose_manifest_keeper(group)
+                keeper = choose_manifest_keeper(group, ignore_json_sidecar_fields=ignore_json_sidecar_fields)
                 if keeper is None:
                     skipped_groups += 1
                     progress.manifest_skipped_group()
@@ -73,13 +83,33 @@ def plan_from_manifests(
                     digest=keeper.xxh128,
                     reason="selected_by_manifest_priority",
                 )
-                merge_needed = manifest_required_sidecar_hashes(group) - Counter(keeper.sidecar_xxh128s)
+                log_manifest_kept_sidecars(
+                    logger,
+                    group_id=group_id,
+                    entry=keeper,
+                    disposition="kept_duplicate_keeper_sidecar",
+                    event="keeper_sidecar",
+                    status="kept",
+                    reason="selected_with_keeper",
+                )
+                merge_needed = manifest_required_sidecar_keys(group, ignore_json_sidecar_fields) - manifest_entry_sidecar_key_counter(
+                    keeper,
+                    ignore_json_sidecar_fields,
+                )
                 for duplicate in sorted(group, key=manifest_sort_key):
                     if duplicate == keeper:
                         continue
                     duplicate_files += 1
                     progress.manifest_planned_move()
-                    log_manifest_duplicate_plan(logger, group_id, duplicate, keeper, merge_needed, output_root)
+                    log_manifest_duplicate_plan(
+                        logger,
+                        group_id,
+                        duplicate,
+                        keeper,
+                        merge_needed,
+                        output_root,
+                        ignore_json_sidecar_fields=ignore_json_sidecar_fields,
+                    )
                 progress.advance()
 
         return ManifestPlanResult(
@@ -107,13 +137,19 @@ def manifest_duplicate_groups(entries: list[ManifestEntry]) -> tuple[list[list[M
     return groups, uniques
 
 
-def choose_manifest_keeper(group: list[ManifestEntry]) -> ManifestEntry | None:
+def choose_manifest_keeper(group: list[ManifestEntry], ignore_json_sidecar_fields: bool = False) -> ManifestEntry | None:
     with_sidecars = [entry for entry in group if entry.sidecar_paths]
     if with_sidecars:
-        candidates = manifest_sidecar_superset_candidates(with_sidecars)
+        candidates = manifest_sidecar_superset_candidates(
+            with_sidecars,
+            ignore_json_sidecar_fields=ignore_json_sidecar_fields,
+        )
         if candidates:
             return sorted(candidates, key=manifest_keeper_key)[0]
-        if not manifest_sidecars_are_class_merge_compatible(group):
+        if not manifest_sidecars_are_class_merge_compatible(
+            group,
+            ignore_json_sidecar_fields=ignore_json_sidecar_fields,
+        ):
             return None
     return sorted(group, key=manifest_keeper_key)[0]
 
@@ -127,8 +163,11 @@ def manifest_sidecar_signature(entry: ManifestEntry) -> tuple[str, ...]:
     return tuple(sorted(entry.sidecar_xxh128s))
 
 
-def manifest_sidecar_superset_candidates(entries: list[ManifestEntry]) -> list[ManifestEntry]:
-    counters = [(entry, Counter(entry.sidecar_xxh128s)) for entry in entries]
+def manifest_sidecar_superset_candidates(
+    entries: list[ManifestEntry],
+    ignore_json_sidecar_fields: bool = False,
+) -> list[ManifestEntry]:
+    counters = [(entry, manifest_entry_sidecar_key_counter(entry, ignore_json_sidecar_fields)) for entry in entries]
     return [
         entry
         for entry, counter in counters
@@ -136,8 +175,14 @@ def manifest_sidecar_superset_candidates(entries: list[ManifestEntry]) -> list[M
     ]
 
 
-def manifest_sidecars_are_class_merge_compatible(entries: list[ManifestEntry]) -> bool:
-    class_counters = manifest_sidecar_class_counters(entries)
+def manifest_sidecars_are_class_merge_compatible(
+    entries: list[ManifestEntry],
+    ignore_json_sidecar_fields: bool = False,
+) -> bool:
+    class_counters = manifest_sidecar_class_counters(
+        entries,
+        ignore_json_sidecar_fields=ignore_json_sidecar_fields,
+    )
     if class_counters is None:
         return False
     for counters in class_counters.values():
@@ -148,7 +193,10 @@ def manifest_sidecars_are_class_merge_compatible(entries: list[ManifestEntry]) -
     return True
 
 
-def manifest_sidecar_class_counters(entries: list[ManifestEntry]) -> dict[str, list[Counter[str]]] | None:
+def manifest_sidecar_class_counters(
+    entries: list[ManifestEntry],
+    ignore_json_sidecar_fields: bool = False,
+) -> dict[str, list[Counter[str]]] | None:
     counters_by_class: dict[str, list[Counter[str]]] = defaultdict(list)
     for entry in entries:
         entry_counters: dict[str, Counter[str]] = defaultdict(Counter)
@@ -156,7 +204,7 @@ def manifest_sidecar_class_counters(entries: list[ManifestEntry]) -> dict[str, l
             sidecar_class = manifest_sidecar_class(path)
             if sidecar_class is None:
                 return None
-            entry_counters[sidecar_class][digest] += 1
+            entry_counters[sidecar_class][manifest_sidecar_key(path, digest, ignore_json_sidecar_fields)] += 1
         for sidecar_class in ("video", "json"):
             counter = entry_counters.get(sidecar_class, Counter())
             if counter:
@@ -165,13 +213,30 @@ def manifest_sidecar_class_counters(entries: list[ManifestEntry]) -> dict[str, l
 
 
 def manifest_required_sidecar_hashes(entries: list[ManifestEntry]) -> Counter[str]:
+    return manifest_required_sidecar_keys(entries, ignore_json_sidecar_fields=False)
+
+
+def manifest_required_sidecar_keys(entries: list[ManifestEntry], ignore_json_sidecar_fields: bool) -> Counter[str]:
     required: Counter[str] = Counter()
-    class_counters = manifest_sidecar_class_counters(entries) or {}
+    class_counters = manifest_sidecar_class_counters(entries, ignore_json_sidecar_fields=ignore_json_sidecar_fields) or {}
     for counters in class_counters.values():
         if not counters:
             continue
         required.update(sorted(counters, key=lambda counter: sum(counter.values()), reverse=True)[0])
     return required
+
+
+def manifest_entry_sidecar_key_counter(entry: ManifestEntry, ignore_json_sidecar_fields: bool) -> Counter[str]:
+    counter: Counter[str] = Counter()
+    for path, digest in zip(entry.sidecar_paths, entry.sidecar_xxh128s, strict=True):
+        counter[manifest_sidecar_key(path, digest, ignore_json_sidecar_fields)] += 1
+    return counter
+
+
+def manifest_sidecar_key(path: Path, digest: str, ignore_json_sidecar_fields: bool) -> str:
+    if ignore_json_sidecar_fields and path.suffix.lower() in JSON_SIDECAR_EXTENSIONS:
+        return "__json_sidecar__"
+    return digest
 
 
 def manifest_sidecar_class(path: Path) -> str | None:
@@ -232,11 +297,44 @@ def log_manifest_sidecar_conflict(logger: CsvLogger, group_id: str, group: list[
                 group_id=group_id,
                 file_role="sidecar",
                 input_root=entry.nas_root_label,
+                primary_source_path=entry.nas_path,
                 source_path=sidecar_path,
                 size_bytes=sidecar_size,
                 digest=sidecar_hash,
                 reason="unresolved_sidecar_conflict",
             )
+
+
+def log_manifest_kept_sidecars(
+    logger: CsvLogger,
+    *,
+    group_id: str,
+    entry: ManifestEntry,
+    disposition: str,
+    event: str,
+    status: str,
+    reason: str,
+) -> None:
+    for sidecar_path, sidecar_size, sidecar_hash in zip(
+        entry.sidecar_paths,
+        entry.sidecar_sizes,
+        entry.sidecar_xxh128s,
+        strict=True,
+    ):
+        logger.row(
+            disposition=disposition,
+            event=event,
+            status=status,
+            group_id=group_id,
+            file_role="sidecar",
+            input_root=entry.nas_root_label,
+            primary_source_path=entry.nas_path,
+            source_path=sidecar_path,
+            keeper_path=entry.nas_path if status == "kept" else "",
+            size_bytes=sidecar_size,
+            digest=sidecar_hash,
+            reason=reason,
+        )
 
 
 def log_manifest_duplicate_plan(
@@ -246,6 +344,8 @@ def log_manifest_duplicate_plan(
     keeper: ManifestEntry,
     merge_needed: Counter[str],
     output_root: Path,
+    *,
+    ignore_json_sidecar_fields: bool = False,
 ) -> None:
     logger.row(
         disposition="planned_duplicate_primary",
@@ -268,8 +368,9 @@ def log_manifest_duplicate_plan(
         duplicate.sidecar_xxh128s,
         strict=True,
     ):
-        if merge_needed[digest] > 0:
-            merge_needed[digest] -= 1
+        sidecar_key = manifest_sidecar_key(path, digest, ignore_json_sidecar_fields)
+        if merge_needed[sidecar_key] > 0:
+            merge_needed[sidecar_key] -= 1
             logger.row(
                 disposition="planned_sidecar_merge",
                 event="sidecar_merge",

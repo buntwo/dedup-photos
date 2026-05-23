@@ -54,6 +54,15 @@ class ManifestVerifyResult:
 
 
 @dataclass(frozen=True)
+class JsonSidecarAnalysisResult:
+    log_path: Path
+    analyzed_groups: int
+    differing_groups: int
+    differing_keys: int
+    parse_errors: int
+
+
+@dataclass(frozen=True)
 class VerifyMoveResult:
     log_path: Path
     checked_paths: int

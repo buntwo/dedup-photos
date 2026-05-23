@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dedup_photos.execute import execute_plan
 from dedup_photos.hashing import files_equal_by_path, hash_file_xxh128
+from dedup_photos.json_analysis import analyze_json_sidecars
 from dedup_photos.manifest_io import (
     MANIFEST_FIELDS,
     collapse_duplicate_manifest_paths,
@@ -15,6 +16,7 @@ from dedup_photos.manifest_io import (
 )
 from dedup_photos.models import (
     ExecutePlanResult,
+    JsonSidecarAnalysisResult,
     ManifestEntry,
     ManifestInventoryRow,
     ManifestPlanResult,
@@ -44,6 +46,7 @@ from dedup_photos.verify import (
 
 __all__ = [
     "ExecutePlanResult",
+    "JsonSidecarAnalysisResult",
     "MANIFEST_FIELDS",
     "ManifestEntry",
     "ManifestInventoryRow",
@@ -52,6 +55,7 @@ __all__ = [
     "PlanBundle",
     "PlanRow",
     "VerifyMoveResult",
+    "analyze_json_sidecars",
     "byte_check_manifest_group",
     "choose_manifest_keeper",
     "collapse_duplicate_manifest_paths",
