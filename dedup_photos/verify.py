@@ -56,7 +56,7 @@ def verify_manifests(
         )
         progress.manifest_group_stats(len(byte_check_groups), len(uniques))
         progress.start_phase("manifest-verify-bytes", len(byte_check_groups))
-        actual_log_path = log_path or default_log_path()
+        actual_log_path = log_path or default_log_path("verify_bytes")
         failed_groups = 0
 
         prepare_new_output_path(actual_log_path, "verify log")
@@ -176,7 +176,7 @@ def verify_move(
         progress.start_phase("manifest-load", len(manifest_paths))
         entries = load_manifests(manifest_paths, progress)
         uncategorized_entries = load_uncategorized_manifest_rows(manifest_paths)
-        actual_log_path = log_path or default_log_path()
+        actual_log_path = log_path or default_log_path("verify_move")
         expected_destinations: set[Path] = set()
         checked_paths = 0
         matched_paths = 0

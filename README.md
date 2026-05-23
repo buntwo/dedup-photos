@@ -40,10 +40,11 @@ Use the same manifests throughout the workflow.
 
 1. Create one manifest per copied local batch.
 2. Plan duplicate moves from all manifests.
-3. Byte-check same-size/same-hash duplicate buckets.
-4. Dry-run the move plan.
-5. Execute the move plan with `--move`.
-6. Verify that the expected moved files are present in the duplicate holding directory.
+3. Analyze the plan totals.
+4. Byte-check same-size/same-hash duplicate buckets.
+5. Dry-run the move plan.
+6. Execute the move plan with `--move`.
+7. Verify that the expected moved files are present in the duplicate holding directory.
 
 ### 1. Create Manifests
 
@@ -135,7 +136,17 @@ uv run dedup-photos plan \
 
 This flag is not the default. It does not edit JSON files; it keeps the keeper bundle's JSON in place and moves duplicate JSON sidecars to the duplicate holding tree.
 
-### 3. Verify Bytes
+### 3. Analyze Plan
+
+`analyze-plan` reads the plan CSV only and prints move counts, byte totals, and useful breakdowns before you touch the NAS files.
+
+```bash
+uv run dedup-photos analyze-plan move_plan.csv
+```
+
+The duplicate-output move totals count only files planned to move into the duplicate holding tree. Keeper-side sidecar merges are reported separately because they rename a sidecar into the keeper directory instead of moving it to `--output`.
+
+### 4. Verify Bytes
 
 `verify-bytes` rereads NAS files in same-size/same-hash manifest buckets and performs byte-level comparisons. It checks primary images, sidecars, and uncategorized files.
 
@@ -148,7 +159,7 @@ uv run dedup-photos verify-bytes \
 
 Run this before moving if you want proof that hash-equivalent buckets are byte-identical. It can be slower on a NAS because it rereads the relevant files.
 
-### 4. Dry-Run Execution
+### 5. Dry-Run Execution
 
 Execution is a dry run by default. This validates the plan and writes a row-by-row execution log without moving files.
 
@@ -157,7 +168,7 @@ uv run dedup-photos execute-plan move_plan.csv \
   --log execute_dry_run.csv
 ```
 
-### 5. Move Duplicates
+### 6. Move Duplicates
 
 Move mode requires the explicit `--move` flag. By default, move mode rehashes each planned source file immediately before moving and skips bundles whose current hashes differ from the plan.
 
@@ -178,7 +189,7 @@ uv run dedup-photos execute-plan move_plan.csv \
 
 `--no-verify-source-hashes` is faster, but less safe on a mutable NAS tree because same-size content changes will not be caught before moving.
 
-### 6. Verify Moves
+### 7. Verify Moves
 
 After moving, verify that expected duplicate files are present in the duplicate holding directory and that unexpected files are not present.
 
@@ -286,7 +297,7 @@ Uncategorized files use the same exact `(size_bytes, xxh128)` grouping and path 
 
 ## CSV Outputs
 
-Every command writes a CSV log. Pass `--log path/to/log.csv` to choose the path; otherwise the command writes a timestamped log in the current directory. Output files are never overwritten; if the target log or manifest already exists, the command exits with an error.
+Every command writes a CSV log. Pass `--log path/to/log.csv` to choose the path; otherwise the command writes an action-prefixed timestamped log in the current directory, such as `plan_20260523_120000.csv` or `execute_plan_20260523_120000.csv`. Output files are never overwritten; if the target log or manifest already exists, the command exits with an error.
 
 Manifest CSVs contain one data row per regular non-symlink file under the local batch root. Rows include:
 

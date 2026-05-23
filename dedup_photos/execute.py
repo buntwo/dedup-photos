@@ -38,7 +38,7 @@ def execute_plan(
     try:
         progress.start_phase("manifest-load-plan", count_csv_data_rows(plan_path))
         bundles, orphan_sidecars, hash_field = load_plan_bundles(plan_path, progress)
-        actual_log_path = log_path or default_log_path()
+        actual_log_path = log_path or default_log_path("execute_plan")
         duplicate_destinations = duplicate_destination_paths(bundles)
         effective_verify_source_hashes = move if verify_source_hashes is None else verify_source_hashes
         mode = "execute_plan_move" if move else "execute_plan_dry_run"

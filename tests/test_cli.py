@@ -45,6 +45,17 @@ def test_manifest_cli_subcommands(tmp_path: Path) -> None:
     assert [row for row in rows(plan_log) if row["event"] == "duplicate_primary_move"]
     assert rows(verify_log)[0]["disposition"] == "verify_matched"
 
+def test_analyze_plan_cli_prints_move_summary(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    case = make_move_case(tmp_path)
+
+    assert manifest_main(["analyze-plan", str(case.plan_path)]) == 0
+
+    output = capsys.readouterr().out
+    assert "Duplicate-output moves:" in output
+    assert "files: 1" in output
+    assert "Sidecar merges into keeper directories:" in output
+    assert "By file_role:" in output
+
 def test_manifest_cli_subcommands_emit_progress(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     local_one = tmp_path / "one"
     local_two = tmp_path / "two"

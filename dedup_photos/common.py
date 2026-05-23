@@ -36,9 +36,9 @@ CSV_FIELDS = [
 ]
 
 
-def default_log_path() -> Path:
+def default_log_path(action: str) -> Path:
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    return Path.cwd() / f"dedup_photos_{stamp}.csv"
+    return Path.cwd() / f"{action}_{stamp}.csv"
 
 
 def prepare_new_output_path(path: Path, description: str) -> Path:

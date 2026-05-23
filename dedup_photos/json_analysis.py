@@ -45,7 +45,7 @@ def analyze_json_sidecars(
             if choose_manifest_keeper(group) is None and manifest_group_has_json_sidecars(group)
         ]
         progress.start_phase("json-sidecar-analysis", len(conflict_groups))
-        actual_log_path = log_path or default_log_path()
+        actual_log_path = log_path or default_log_path("analyze_json_sidecars")
         differing_groups = 0
         differing_key_count = 0
         parse_errors = 0

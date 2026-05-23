@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -44,6 +45,28 @@ class ManifestPlanResult:
     duplicate_groups: int
     duplicate_files: int
     skipped_groups: int
+
+
+@dataclass(frozen=True)
+class PlanAnalysisResult:
+    plan_path: Path
+    duplicate_output_files: int
+    duplicate_output_bytes: int
+    duplicate_output_groups: int
+    sidecar_merge_files: int
+    sidecar_merge_bytes: int
+    sidecar_merge_groups: int
+    skipped_rows: int
+    duplicate_output_destination_conflicts: int
+    sidecar_merge_target_conflicts: int
+    invalid_size_rows: int
+    by_file_role: Counter[str]
+    bytes_by_file_role: Counter[str]
+    by_disposition: Counter[str]
+    bytes_by_disposition: Counter[str]
+    by_input_root: Counter[str]
+    bytes_by_input_root: Counter[str]
+    skipped_by_disposition: Counter[str]
 
 
 @dataclass(frozen=True)

@@ -31,7 +31,7 @@ def plan_from_manifests(
         progress.start_phase("manifest-load", len(manifest_paths))
         entries = load_manifests(manifest_paths, progress)
         uncategorized_entries = load_uncategorized_manifest_rows(manifest_paths)
-        actual_log_path = log_path or default_log_path()
+        actual_log_path = log_path or default_log_path("plan")
         groups, uniques = manifest_duplicate_groups(entries)
         uncategorized_groups, uncategorized_uniques = uncategorized_duplicate_groups(uncategorized_entries)
         progress.manifest_group_stats(len(groups) + len(uncategorized_groups), len(uniques) + len(uncategorized_uniques))

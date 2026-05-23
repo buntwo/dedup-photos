@@ -21,10 +21,12 @@ from dedup_photos.models import (
     ManifestInventoryRow,
     ManifestPlanResult,
     ManifestVerifyResult,
+    PlanAnalysisResult,
     PlanBundle,
     PlanRow,
     VerifyMoveResult,
 )
+from dedup_photos.plan_analysis import analyze_plan
 from dedup_photos.planning import (
     choose_manifest_keeper,
     log_manifest_duplicate_plan,
@@ -52,10 +54,12 @@ __all__ = [
     "ManifestInventoryRow",
     "ManifestPlanResult",
     "ManifestVerifyResult",
+    "PlanAnalysisResult",
     "PlanBundle",
     "PlanRow",
     "VerifyMoveResult",
     "analyze_json_sidecars",
+    "analyze_plan",
     "byte_check_manifest_group",
     "choose_manifest_keeper",
     "collapse_duplicate_manifest_paths",

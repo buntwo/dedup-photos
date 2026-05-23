@@ -4,8 +4,10 @@ import argparse
 import sys
 from pathlib import Path
 
+from dedup_photos.models import PlanAnalysisResult
 from dedup_photos.manifest import (
     analyze_json_sidecars,
+    analyze_plan,
     execute_plan,
     generate_manifest,
     plan_from_manifests,
@@ -24,6 +26,7 @@ def build_manifest_parser() -> argparse.ArgumentParser:
             "    --nas-root /my/nas/google_photos\n"
             "  dedup-photos plan /local/project/google_photos.manifest.csv phone.manifest.csv \\\n"
             "    --output /my/nas/dupes --log move_plan.csv\n"
+            "  dedup-photos analyze-plan move_plan.csv\n"
             "  dedup-photos verify-bytes /local/project/google_photos.manifest.csv phone.manifest.csv \\\n"
             "    --log byte_verify.csv\n"
             "  dedup-photos analyze-json-sidecars /local/project/google_photos.manifest.csv phone.manifest.csv \\\n"
@@ -107,6 +110,19 @@ def build_manifest_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Treat JSON sidecars as equivalent regardless of JSON field/content differences. Default is strict.",
     )
+
+    analyze_plan_parser = subparsers.add_parser(
+        "analyze-plan",
+        help="Print statistics for a move-plan CSV.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=(
+            "This reads only the plan CSV. Duplicate-output totals count rows planned\n"
+            "to move into the duplicate holding tree and exclude keeper-side sidecar merges.\n\n"
+            "Example:\n"
+            "  dedup-photos analyze-plan move_plan.csv"
+        ),
+    )
+    analyze_plan_parser.add_argument("plan", type=Path, help="Move-plan CSV created by the plan subcommand.")
 
     analyze_json = subparsers.add_parser(
         "analyze-json-sidecars",
@@ -214,6 +230,10 @@ def manifest_main(argv: list[str] | None = None) -> int:
                 f"duplicate_files={result.duplicate_files} skipped_groups={result.skipped_groups}"
             )
             return 0
+        if args.command == "analyze-plan":
+            result = analyze_plan(args.plan)
+            print(format_plan_analysis(result))
+            return 0
         if args.command == "analyze-json-sidecars":
             result = analyze_json_sidecars(args.manifests, args.log, show_progress=True)
             print(
@@ -266,6 +286,64 @@ def manifest_main(argv: list[str] | None = None) -> int:
 
 def default_manifest_output_path(local_batch_root: Path) -> Path:
     return Path(f"{local_batch_root}.manifest.csv")
+
+
+def format_plan_analysis(result: PlanAnalysisResult) -> str:
+    lines = [
+        f"Plan analysis: {result.plan_path}",
+        "",
+        "Duplicate-output moves:",
+        f"  files: {result.duplicate_output_files}",
+        f"  groups: {result.duplicate_output_groups}",
+        f"  size: {format_size_summary(result.duplicate_output_bytes)}",
+        "",
+        "Sidecar merges into keeper directories:",
+        f"  files: {result.sidecar_merge_files}",
+        f"  groups: {result.sidecar_merge_groups}",
+        f"  size: {format_size_summary(result.sidecar_merge_bytes)}",
+        "",
+        "Safety checks:",
+        f"  skipped/error rows: {result.skipped_rows}",
+        f"  duplicate output destinations: {result.duplicate_output_destination_conflicts}",
+        f"  duplicate sidecar-merge targets: {result.sidecar_merge_target_conflicts}",
+        f"  invalid size rows: {result.invalid_size_rows}",
+        "",
+        "By file_role:",
+        *format_counter_lines(result.by_file_role, result.bytes_by_file_role),
+        "",
+        "By disposition:",
+        *format_counter_lines(result.by_disposition, result.bytes_by_disposition),
+        "",
+        "By input_root:",
+        *format_counter_lines(result.by_input_root, result.bytes_by_input_root),
+    ]
+    if result.skipped_by_disposition:
+        lines.extend(
+            [
+                "",
+                "Skipped/error rows by disposition:",
+                *format_counter_lines(result.skipped_by_disposition),
+            ]
+        )
+    return "\n".join(lines)
+
+
+def format_counter_lines(counts, byte_counts=None) -> list[str]:
+    if not counts:
+        return ["  (none)"]
+    lines = []
+    for key in sorted(counts):
+        if byte_counts is None:
+            lines.append(f"  {key}: {counts[key]}")
+        else:
+            lines.append(f"  {key}: {counts[key]} files, {format_size_summary(byte_counts[key])}")
+    return lines
+
+
+def format_size_summary(size_bytes: int) -> str:
+    gib = size_bytes / 1024**3
+    gb = size_bytes / 1000**3
+    return f"{size_bytes} bytes ({gib:.2f} GiB, {gb:.2f} GB)"
 
 
 if __name__ == "__main__":
