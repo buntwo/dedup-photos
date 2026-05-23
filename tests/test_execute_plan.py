@@ -11,6 +11,14 @@ from dedup_photos.manifest import MANIFEST_FIELDS, execute_plan, generate_manife
 from tests.helpers import make_conflict_manifests, make_manifest_move_case, make_move_plan, prepare_nas_root, rows, write, write_csv, write_rows
 
 
+def execute_rows_without_keeper(log_path: Path) -> list[dict[str, str]]:
+    return [row for row in rows(log_path) if row["file_role"] != "keeper"]
+
+
+def keeper_rows(log_path: Path) -> list[dict[str, str]]:
+    return [row for row in rows(log_path) if row["file_role"] == "keeper"]
+
+
 def test_execute_plan_dry_run_validates_without_moving(tmp_path: Path) -> None:
     plan_path, nas_one, nas_two, output_root = make_move_plan(tmp_path)
     log_path = tmp_path / "execute.csv"
@@ -22,9 +30,38 @@ def test_execute_plan_dry_run_validates_without_moving(tmp_path: Path) -> None:
     assert (nas_one / "photo.jpg").exists()
     assert (nas_two / "photo.jpg").exists()
     assert not output_root.exists()
-    execute_rows = rows(log_path)
+    assert keeper_rows(log_path)[0]["disposition"] == "verified_keeper"
+    execute_rows = execute_rows_without_keeper(log_path)
     assert execute_rows[0]["disposition"] == "planned_duplicate_primary"
     assert execute_rows[0]["event"] == "execute_plan_move"
+    assert execute_rows[0]["action_taken"] == "planned"
+    assert execute_rows[0]["hash_check"] == "not_checked"
+
+def test_execute_plan_dry_run_does_not_hash_validate_by_default(tmp_path: Path) -> None:
+    plan_path, _nas_one, nas_two, _output_root = make_move_plan(tmp_path)
+    (nas_two / "photo.jpg").write_bytes(b"diff")
+    log_path = tmp_path / "execute.csv"
+
+    result = execute_plan(plan_path, log_path, move=False)
+
+    assert result.planned_bundles == 1
+    assert (nas_two / "photo.jpg").read_bytes() == b"diff"
+    assert execute_rows_without_keeper(log_path)[0]["disposition"] == "planned_duplicate_primary"
+
+def test_execute_plan_dry_run_can_force_hash_validation(tmp_path: Path) -> None:
+    plan_path, _nas_one, nas_two, _output_root = make_move_plan(tmp_path)
+    (nas_two / "photo.jpg").write_bytes(b"diff")
+    log_path = tmp_path / "execute.csv"
+
+    result = execute_plan(plan_path, log_path, move=False, verify_source_hashes=True)
+
+    assert result.skipped_bundles == 1
+    assert (nas_two / "photo.jpg").read_bytes() == b"diff"
+    failure = execute_rows_without_keeper(log_path)[0]
+    assert failure["reason"] == "source_hash_mismatch"
+    assert failure["validation_result"] == "source_hash_mismatch"
+    assert failure["hash_check"] == "mismatched"
+    assert failure["observed_hash"]
 
 def test_execute_plan_move_moves_primary_and_sidecar_bundle(tmp_path: Path) -> None:
     plan_path, nas_one, nas_two, output_root = make_move_plan(tmp_path, with_sidecars=True)
@@ -40,7 +77,14 @@ def test_execute_plan_move_moves_primary_and_sidecar_bundle(tmp_path: Path) -> N
     assert (output_root / "nas-two" / "photo.jpg").read_bytes() == b"same"
     assert (output_root / "nas-two" / "photo.mov").read_bytes() == b"live"
     execute_rows = rows(log_path)
-    assert {row["disposition"] for row in execute_rows} == {"moved_duplicate_primary", "moved_sidecar"}
+    assert {row["disposition"] for row in execute_rows} == {
+        "verified_keeper",
+        "moved_duplicate_primary",
+        "moved_duplicate_sidecar",
+    }
+    moved_rows = execute_rows_without_keeper(log_path)
+    assert {row["action_taken"] for row in moved_rows} == {"moved"}
+    assert {row["hash_check"] for row in moved_rows} == {"matched"}
 
 def test_execute_plan_moves_full_primary_prefix_sidecar(tmp_path: Path) -> None:
     plan_path, nas_one, nas_two, output_root = make_move_plan(
@@ -72,7 +116,11 @@ def test_execute_plan_destination_collision_skips_bundle(tmp_path: Path) -> None
     assert result.skipped_bundles == 1
     assert (nas_two / "photo.jpg").exists()
     assert (nas_two / "photo.mov").exists()
-    assert {row["reason"] for row in rows(log_path)} == {"destination_exists"}
+    assert {row["reason"] for row in execute_rows_without_keeper(log_path)} == {"destination_exists"}
+    assert {row["disposition"] for row in execute_rows_without_keeper(log_path)} == {
+        "skipped_error_primary",
+        "skipped_error_sidecar",
+    }
 
 def test_execute_plan_missing_keeper_skips_bundle(tmp_path: Path) -> None:
     plan_path, nas_one, nas_two, _output_root = make_move_plan(tmp_path)
@@ -125,7 +173,7 @@ def test_execute_plan_refuses_to_move_keeper_source(tmp_path: Path) -> None:
 
     assert result.skipped_bundles == 1
     assert (nas_one / "photo.jpg").exists()
-    assert rows(log_path)[0]["reason"] == "duplicate_source_is_keeper"
+    assert execute_rows_without_keeper(log_path)[0]["reason"] == "duplicate_source_is_keeper"
 
 def test_execute_plan_already_moved_bundle_is_resumable(tmp_path: Path) -> None:
     plan_path, _nas_one, nas_two, output_root = make_move_plan(tmp_path)
@@ -138,9 +186,32 @@ def test_execute_plan_already_moved_bundle_is_resumable(tmp_path: Path) -> None:
     result = execute_plan(plan_path, log_path, move=True)
 
     assert result.already_moved_bundles == 1
-    execute_rows = rows(log_path)
+    assert keeper_rows(log_path)[0]["disposition"] == "verified_keeper"
+    execute_rows = execute_rows_without_keeper(log_path)
     assert execute_rows[0]["disposition"] == "already_moved_duplicate_primary"
     assert execute_rows[0]["reason"] == "already_moved"
+    assert execute_rows[0]["validation_result"] == "already_moved"
+    assert execute_rows[0]["hash_check"] == "matched"
+
+def test_execute_plan_already_moved_destination_hash_mismatch_skips_bundle(tmp_path: Path) -> None:
+    plan_path, _nas_one, nas_two, output_root = make_move_plan(tmp_path)
+    destination = output_root / "nas-two" / "photo.jpg"
+    destination.parent.mkdir(parents=True)
+    destination.write_bytes(b"diff")
+    (nas_two / "photo.jpg").unlink()
+    log_path = tmp_path / "execute.csv"
+
+    result = execute_plan(plan_path, log_path, move=True)
+
+    assert result.skipped_bundles == 1
+    assert result.already_moved_bundles == 0
+    assert destination.read_bytes() == b"diff"
+    failure = execute_rows_without_keeper(log_path)[0]
+    assert failure["disposition"] == "skipped_error_primary"
+    assert failure["reason"] == "destination_hash_mismatch"
+    assert failure["validation_result"] == "destination_hash_mismatch"
+    assert failure["hash_check"] == "mismatched"
+    assert failure["observed_hash"]
 
 def test_execute_plan_missing_source_without_destination_skips_bundle(tmp_path: Path) -> None:
     plan_path, _nas_one, nas_two, _output_root = make_move_plan(tmp_path)
@@ -150,7 +221,7 @@ def test_execute_plan_missing_source_without_destination_skips_bundle(tmp_path: 
     result = execute_plan(plan_path, log_path, move=True)
 
     assert result.skipped_bundles == 1
-    assert rows(log_path)[0]["reason"] == "source_missing"
+    assert execute_rows_without_keeper(log_path)[0]["reason"] == "source_missing"
 
 def test_execute_plan_source_size_mismatch_skips_bundle(tmp_path: Path) -> None:
     plan_path, _nas_one, nas_two, _output_root = make_move_plan(tmp_path)
@@ -160,14 +231,31 @@ def test_execute_plan_source_size_mismatch_skips_bundle(tmp_path: Path) -> None:
     result = execute_plan(plan_path, log_path, move=True)
 
     assert result.skipped_bundles == 1
-    assert rows(log_path)[0]["reason"] == "source_size_mismatch"
+    assert execute_rows_without_keeper(log_path)[0]["reason"] == "source_size_mismatch"
 
-def test_execute_plan_default_does_not_hash_validate_same_size_source_change(tmp_path: Path) -> None:
+def test_execute_plan_move_hash_validates_same_size_source_change_by_default(tmp_path: Path) -> None:
     plan_path, _nas_one, nas_two, output_root = make_move_plan(tmp_path)
     (nas_two / "photo.jpg").write_bytes(b"diff")
     log_path = tmp_path / "execute.csv"
 
     result = execute_plan(plan_path, log_path, move=True)
+
+    assert result.skipped_bundles == 1
+    assert result.moved_bundles == 0
+    assert (nas_two / "photo.jpg").exists()
+    assert not (output_root / "nas-two" / "photo.jpg").exists()
+    failure = execute_rows_without_keeper(log_path)[0]
+    assert failure["reason"] == "source_hash_mismatch"
+    assert failure["validation_result"] == "source_hash_mismatch"
+    assert failure["hash_check"] == "mismatched"
+    assert failure["observed_hash"]
+
+def test_execute_plan_hash_validation_can_be_opted_out_for_move(tmp_path: Path) -> None:
+    plan_path, _nas_one, nas_two, output_root = make_move_plan(tmp_path)
+    (nas_two / "photo.jpg").write_bytes(b"diff")
+    log_path = tmp_path / "execute.csv"
+
+    result = execute_plan(plan_path, log_path, move=True, verify_source_hashes=False)
 
     assert result.moved_bundles == 1
     assert not (nas_two / "photo.jpg").exists()
@@ -184,7 +272,7 @@ def test_execute_plan_hash_validation_catches_same_size_source_change(tmp_path: 
     assert result.moved_bundles == 0
     assert (nas_two / "photo.jpg").exists()
     assert not (output_root / "nas-two" / "photo.jpg").exists()
-    assert rows(log_path)[0]["reason"] == "source_hash_mismatch"
+    assert execute_rows_without_keeper(log_path)[0]["reason"] == "source_hash_mismatch"
 
 def test_execute_plan_hash_validation_catches_same_size_keeper_change(tmp_path: Path) -> None:
     plan_path, nas_one, nas_two, output_root = make_move_plan(tmp_path)
@@ -198,7 +286,12 @@ def test_execute_plan_hash_validation_catches_same_size_keeper_change(tmp_path: 
     assert (nas_one / "photo.jpg").exists()
     assert (nas_two / "photo.jpg").exists()
     assert not (output_root / "nas-two" / "photo.jpg").exists()
-    assert rows(log_path)[0]["reason"] == "source_hash_mismatch"
+    failure = keeper_rows(log_path)[0]
+    assert failure["disposition"] == "keeper_error"
+    assert failure["reason"] == "keeper_hash_mismatch"
+    assert failure["validation_result"] == "keeper_hash_mismatch"
+    assert failure["hash_check"] == "mismatched"
+    assert failure["observed_hash"]
 
 def test_execute_plan_partial_already_moved_bundle_skips_bundle(tmp_path: Path) -> None:
     plan_path, _nas_one, nas_two, output_root = make_move_plan(tmp_path, with_sidecars=True)
@@ -212,7 +305,7 @@ def test_execute_plan_partial_already_moved_bundle_skips_bundle(tmp_path: Path) 
 
     assert result.skipped_bundles == 1
     assert (nas_two / "photo.mov").exists()
-    assert {row["reason"] for row in rows(log_path)} == {"partial_bundle_state"}
+    assert {row["reason"] for row in execute_rows_without_keeper(log_path)} == {"partial_bundle_state"}
 
 def test_execute_plan_orphan_sidecar_is_logged_and_ignored(tmp_path: Path) -> None:
     plan_path, _nas_one, _nas_two, _output_root = make_move_plan(tmp_path, with_sidecars=True)
@@ -248,7 +341,7 @@ def test_execute_plan_duplicate_destination_skips_affected_bundles(tmp_path: Pat
     result = execute_plan(plan_path, log_path, move=True)
 
     assert result.skipped_bundles == 2
-    assert {row["reason"] for row in rows(log_path)} == {"duplicate_destination_in_plan"}
+    assert {row["reason"] for row in execute_rows_without_keeper(log_path)} == {"duplicate_destination_in_plan"}
 
 def test_execute_plan_ignores_non_planned_rows(tmp_path: Path) -> None:
     plan_path, _nas_one, _nas_two, _output_root = make_move_plan(tmp_path)

@@ -104,20 +104,21 @@ def build_manifest_parser() -> argparse.ArgumentParser:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=(
             "Default is a dry run: the plan is validated and logged, but no files move.\n"
-            "Add --move to move duplicate primaries and their sidecars.\n\n"
+            "Add --move to move duplicate primaries and their sidecars. Move mode rehashes\n"
+            "planned source files before moving unless --no-verify-source-hashes is passed.\n\n"
             "Examples:\n"
             "  dedup-photos execute-plan move_plan.csv --log execute_dry_run.csv\n"
             "  dedup-photos execute-plan move_plan.csv --move --log execute.csv\n"
-            "  dedup-photos execute-plan move_plan.csv --move --verify-source-hashes --log execute.csv"
+            "  dedup-photos execute-plan move_plan.csv --move --no-verify-source-hashes --log execute.csv"
         ),
     )
     execute.add_argument("plan", type=Path, help="Move-plan CSV created by the plan subcommand.")
     execute.add_argument("--log", type=Path, default=None, help="CSV execution log to write.")
     execute.add_argument("--move", action="store_true", help="Actually move files. Default is dry run.")
     execute.add_argument(
-        "--verify-source-hashes",
+        "--no-verify-source-hashes",
         action="store_true",
-        help="Before moving, rehash planned source files and skip bundles whose current hashes differ from the plan.",
+        help="Skip the default source hash verification in move mode. Faster, but less safe.",
     )
 
     verify_move_parser = subparsers.add_parser(
@@ -174,7 +175,7 @@ def manifest_main(argv: list[str] | None = None) -> int:
                 args.log,
                 args.move,
                 show_progress=True,
-                verify_source_hashes=args.verify_source_hashes,
+                verify_source_hashes=False if args.no_verify_source_hashes else None,
             )
             print(
                 f"Completed execute-plan; bundles={result.bundles} "

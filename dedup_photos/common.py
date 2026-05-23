@@ -26,6 +26,10 @@ CSV_FIELDS = [
     "keeper_path",
     "size_bytes",
     "xxh64",
+    "observed_hash",
+    "hash_check",
+    "validation_result",
+    "action_taken",
     "reason",
     "message",
 ]
@@ -75,6 +79,10 @@ class CsvLogger:
         keeper_path: Path | str = "",
         size_bytes: int | str = "",
         digest: str = "",
+        observed_hash: str = "",
+        hash_check: str = "",
+        validation_result: str = "",
+        action_taken: str = "",
         reason: str = "",
         message: str = "",
     ) -> None:
@@ -94,6 +102,10 @@ class CsvLogger:
                 "keeper_path": str(keeper_path),
                 "size_bytes": size_bytes,
                 self._hash_field: digest,
+                "observed_hash": observed_hash,
+                "hash_check": hash_check,
+                "validation_result": validation_result,
+                "action_taken": action_taken,
                 "reason": reason,
                 "message": message,
             }

@@ -6,14 +6,13 @@ The tool never deletes files. `execute-plan` is a dry run unless `--move` is pas
 
 ## What Gets Deduped
 
-Primary image files participate in deduplication:
+Primary image files participate in deduplication. The exact case-insensitive extension set is defined in `dedup_photos.constants.PRIMARY_IMAGE_EXTENSIONS`; print it with:
 
-- `.jpg`
-- `.jpeg`
-- `.heic`
-- `.png`
+```bash
+uv run python -c 'from dedup_photos.constants import PRIMARY_IMAGE_EXTENSIONS; print("\n".join(sorted(PRIMARY_IMAGE_EXTENSIONS)))'
+```
 
-Extension matching is case-insensitive. Other regular files are still recorded in manifests, but they are marked as either `sidecar` or `uncategorized`.
+Other regular files are still recorded in manifests, but they are marked as either `sidecar` or `uncategorized`.
 
 Sidecars are files associated with a primary image, such as Live Photo videos or JSON metadata. They affect keeper selection and move together with duplicate primary images. Uncategorized files are hashed for audit/debugging, but are not deduped.
 
@@ -138,7 +137,7 @@ uv run dedup-photos execute-plan move_plan.csv \
 
 ### 5. Move Duplicates
 
-Move mode requires the explicit `--move` flag.
+Move mode requires the explicit `--move` flag. By default, move mode rehashes each planned source file immediately before moving and skips bundles whose current hashes differ from the plan.
 
 ```bash
 uv run dedup-photos execute-plan move_plan.csv \
@@ -146,16 +145,16 @@ uv run dedup-photos execute-plan move_plan.csv \
   --log execute.csv
 ```
 
-For extra safety on a mutable NAS tree, rehash each planned source file immediately before moving:
+To skip this extra hash verification, pass `--no-verify-source-hashes`:
 
 ```bash
 uv run dedup-photos execute-plan move_plan.csv \
   --move \
-  --verify-source-hashes \
+  --no-verify-source-hashes \
   --log execute.csv
 ```
 
-`--verify-source-hashes` is slower, but catches planned source files whose contents changed after the manifest was created.
+`--no-verify-source-hashes` is faster, but less safe on a mutable NAS tree because same-size content changes will not be caught before moving.
 
 ### 6. Verify Moves
 
@@ -192,12 +191,7 @@ test "$local_count" = "$manifest_count"
 The number of primary image files should also equal the number of manifest rows marked `file_role=primary`:
 
 ```bash
-image_count=$(find "$LOCAL_ROOT" -type f \( \
-  -iname '*.jpg' -o \
-  -iname '*.jpeg' -o \
-  -iname '*.heic' -o \
-  -iname '*.png' \
-\) | wc -l | tr -d ' ')
+image_count=$(uv run python -c 'from pathlib import Path; import sys; from dedup_photos.constants import PRIMARY_IMAGE_EXTENSIONS; root=Path(sys.argv[1]); print(sum(1 for path in root.rglob("*") if path.is_file() and not path.is_symlink() and path.suffix.lower() in PRIMARY_IMAGE_EXTENSIONS))' "$LOCAL_ROOT")
 primary_rows=$(python3 -c 'import csv, sys; print(sum(row["file_role"] == "primary" for row in csv.DictReader(open(sys.argv[1], newline="", encoding="utf-8"))))' "$MANIFEST")
 printf 'image files:  %s\nprimary rows: %s\n' "$image_count" "$primary_rows"
 test "$image_count" = "$primary_rows"
@@ -252,11 +246,19 @@ Plan and execution CSVs include a `disposition` column intended for easy filteri
 - `kept_duplicate_keeper`
 - `planned_duplicate_primary`
 - `planned_duplicate_sidecar`
+- `verified_keeper`
+- `keeper_error`
 - `moved_duplicate_primary`
 - `moved_duplicate_sidecar`
-- `kept_error`
+- `already_moved_duplicate_primary`
+- `already_moved_sidecar`
+- `skipped_error_primary`
+- `skipped_error_sidecar`
+- `orphan_plan_sidecar`
 - `verify_matched`
 - `verify_failed`
+
+Execution logs also include `observed_hash`, `hash_check`, `validation_result`, and `action_taken`. These make move-mode deviations easier to filter: `status=error` identifies rows that did not follow the plan, `validation_result` gives the specific cause, and `observed_hash` records the current hash when a source or already-moved destination was rehashed.
 
 Sidecar rows include `primary_source_path` so they can be traced back to the primary image without relying on filename stems.
 
@@ -285,21 +287,11 @@ uv run dedup-photos verify-move --help
 Count local primary image files under a root:
 
 ```bash
-find /local/project/google_photos -type f \( \
-  -iname '*.jpg' -o \
-  -iname '*.jpeg' -o \
-  -iname '*.heic' -o \
-  -iname '*.png' \
-\) | wc -l
+uv run python -c 'from pathlib import Path; import sys; from dedup_photos.constants import PRIMARY_IMAGE_EXTENSIONS; root=Path(sys.argv[1]); print(sum(1 for path in root.rglob("*") if path.is_file() and not path.is_symlink() and path.suffix.lower() in PRIMARY_IMAGE_EXTENSIONS))' /local/project/google_photos
 ```
 
 Print which primary image extensions are present:
 
 ```bash
-find /local/project/google_photos -type f \( \
-  -iname '*.jpg' -o \
-  -iname '*.jpeg' -o \
-  -iname '*.heic' -o \
-  -iname '*.png' \
-\) -print | awk -F. 'NF > 1 { ext=tolower($NF); count[ext]++ } END { for (ext in count) print ext, count[ext] }' | sort
+uv run python -c 'from collections import Counter; from pathlib import Path; import sys; from dedup_photos.constants import PRIMARY_IMAGE_EXTENSIONS; root=Path(sys.argv[1]); counts=Counter(path.suffix.lower() for path in root.rglob("*") if path.is_file() and not path.is_symlink() and path.suffix.lower() in PRIMARY_IMAGE_EXTENSIONS); [print(ext, counts[ext]) for ext in sorted(counts)]' /local/project/google_photos
 ```
